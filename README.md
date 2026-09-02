@@ -2,47 +2,36 @@
 
 Per-request latency and throughput timing for [pi](https://github.com/earendil-works/pi).
 
-When enabled, each assistant message gets a one-line timing entry in the transcript:
+When enabled, pi-req-timer shows one timing line below each completed assistant response in the transcript. The footer shows the averages for the current session using the same format:
 
-```
-⏱ 0.42s · 45.3 tok/s
-```
-
-While active, the footer shows token-weighted session averages:
-
-```
-⏱ 0.91s · 48 tok/s
+```text
+⏱ 8.82s · 27.2 tok/s
 ```
 
 ## Metrics
 
 - **Latency** — time from request start to the first thinking or text token.
-- **Throughput** — (output + reasoning tokens) divided by streaming time after the first token.
+- **Throughput** — output and reasoning tokens per second after the first token.
 
-Token counts are used for the weighted average but never displayed; the footer already reports token usage. Averages cover the current session branch and are rebuilt from session entries after reload or `/tree` navigation.
+Tool calls and incomplete responses are omitted.
 
 ## Usage
 
-```
-/timer          Toggle on/off
-/timer on|off   Set explicitly
-/timer status   Show current state
+```text
+/timer          Toggle timing on or off
+/timer on       Enable timing
+/timer off      Disable timing
+/timer status   Show timing status
 /timer reset    Clear session averages
 ```
 
-The toggle state persists per session, so it survives restarts and `/tree` navigation.
+Timing state and measurements persist with the session and follow the active branch after `/reload` or `/tree` navigation.
 
 ## Install
 
-```
+```text
 pi install git:github.com/nijaru/pi-req-timer
 ```
-
-## Notes
-
-- Only main agent-loop assistant messages are timed. Compaction sub-calls and
-  subagents run in separate sessions and are excluded.
-- Tool-call, failed, aborted, and empty streams are skipped; only completed visible responses are timed.
 
 ## License
 
