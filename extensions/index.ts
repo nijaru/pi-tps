@@ -6,8 +6,8 @@
  * - Measures TPS as (output + reasoning tokens) / stream duration after the
  *   first token. Tokens are used only for the weighted average; they are not
  *   displayed anywhere (the footer already reports token usage).
- * - Per-message timing renders as a collapsible transcript entry, collapsed by
- *   default like thinking blocks (ctrl+o expands).
+ * - Per-message timing renders as one line directly below each completed
+ *   assistant response.
  * - Toggle with /timer [on|off|status|reset]. State persists in the session,
  *   so it survives reloads and is restored on the correct branch after /tree.
  */
@@ -41,13 +41,22 @@ const emptyAggregates = (): Aggregates => ({
 	ttftCount: 0,
 });
 
+function isUsableMetric(m: Metric): boolean {
+	return (
+		m.ttftMs !== undefined &&
+		m.ttftMs >= 0 &&
+		m.streamMs > 0 &&
+		m.tokens > 0 &&
+		(m.stopReason === "stop" || m.stopReason === "length")
+	);
+}
+
 function record(agg: Aggregates, m: Metric): void {
+	if (!isUsableMetric(m)) return;
 	agg.totalTokens += m.tokens;
 	agg.totalStreamMs += m.streamMs;
-	if (m.ttftMs !== undefined && m.ttftMs >= 0) {
-		agg.ttftSumMs += m.ttftMs;
-		agg.ttftCount += 1;
-	}
+	agg.ttftSumMs += m.ttftMs!;
+	agg.ttftCount += 1;
 }
 
 function fmtSeconds(ms: number): string {
@@ -63,6 +72,7 @@ function fmtTps(tokens: number, ms: number): string {
 export default function (pi: ExtensionAPI) {
 	let active = false;
 	let pending: { startMs: number; firstDeltaMs: number | undefined } | undefined;
+	let pendingMetrics: Metric[] = [];
 	let agg = emptyAggregates();
 
 	function aggregatesFromBranch(ctx: ExtensionContext): Aggregates {
@@ -82,7 +92,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		ctx.ui.setStatus(
 			STATUS_KEY,
-			`⏱ ttft ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)} · tps ${fmtTps(agg.totalTokens, agg.totalStreamMs)}`,
+			`⏱ ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)} · ${fmtTps(agg.totalTokens, agg.totalStreamMs)} tok/s`,
 		);
 	}
 
@@ -113,16 +123,32 @@ export default function (pi: ExtensionAPI) {
 			tokens: (message.usage?.output ?? 0) + (message.usage?.reasoning ?? 0),
 			stopReason: message.stopReason ?? "unknown",
 		};
-		// Empty streams (abort/error before the first token) have nothing to time.
-		if (metric.ttftMs === undefined && metric.tokens === 0) return;
+		// Only completed visible responses have meaningful latency/throughput.
+		// Tool-call, failed, aborted, and empty streams must not create rows or
+		// contaminate the session averages.
+		if (!isUsableMetric(metric)) return;
 
 		record(agg, metric);
-		pi.appendEntry(METRIC_ENTRY, metric);
+		pendingMetrics.push(metric);
 		updateFooter(ctx);
 	});
 
+	function flushMetric(): void {
+		const metric = pendingMetrics.shift();
+		if (metric) pi.appendEntry(METRIC_ENTRY, metric);
+	}
+
+	pi.on("turn_end", async (event) => {
+		if (event.message.role === "assistant") flushMetric();
+	});
+
+	// Preserve a partial metric if an agent run ends without a turn_end event.
+	pi.on("agent_end", async () => {
+		while (pendingMetrics.length > 0) flushMetric();
+	});
+
 	pi.registerCommand("timer", {
-		description: "Toggle request timing (TTFT/TPS); /timer [on|off|status|reset]",
+		description: "Toggle request timing; /timer [on|off|status|reset]",
 		getArgumentCompletions: (prefix) => {
 			const values = ["on", "off", "status", "reset"];
 			const items = values.filter((v) => v.startsWith(prefix.trim().toLowerCase()));
@@ -156,13 +182,12 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// One fixed line per message; the /timer toggle controls visibility entirely.
-	// Abnormal stop reasons get a suffix since they change how to read the numbers.
+	// One fixed line per message. The /timer toggle controls visibility for
+	// existing and future rows alike; there is no alternate display format.
 	pi.registerEntryRenderer(METRIC_ENTRY, (entry, _opts, theme) => {
 		const m = entry.data as Metric;
-		const ttft = m.ttftMs !== undefined ? fmtSeconds(m.ttftMs) : "n/a";
-		const suffix = m.stopReason !== "stop" ? ` · ${m.stopReason}` : "";
-		return new Text(theme.fg("dim", `⏱ ttft ${ttft} · ${fmtTps(m.tokens, m.streamMs)} tok/s${suffix}`));
+		if (!active || !isUsableMetric(m)) return new Text("");
+		return new Text(theme.fg("dim", `⏱ ${fmtSeconds(m.ttftMs!)} · ${fmtTps(m.tokens, m.streamMs)} tok/s`));
 	});
 
 	pi.on("session_start", async (_event, ctx) => {

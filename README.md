@@ -5,19 +5,19 @@ Per-request latency and throughput timing for [pi](https://github.com/earendil-w
 When enabled, each assistant message gets a one-line timing entry in the transcript:
 
 ```
-⏱ ttft 0.42s · 45.3 tok/s
+⏱ 0.42s · 45.3 tok/s
 ```
 
 While active, the footer shows token-weighted session averages:
 
 ```
-⏱ ttft 0.91s · tps 48
+⏱ 0.91s · 48 tok/s
 ```
 
 ## Metrics
 
-- **TTFT** — time from request start to the first thinking or text token.
-- **TPS** — (output + reasoning tokens) divided by streaming time after the first token.
+- **Latency** — time from request start to the first thinking or text token.
+- **Throughput** — (output + reasoning tokens) divided by streaming time after the first token.
 
 Token counts are used for the weighted average but never displayed; the footer already reports token usage. Averages cover the current session branch and are rebuilt from session entries after reload or `/tree` navigation.
 
@@ -42,7 +42,7 @@ pi install git:github.com/nijaru/pi-req-timer
 
 - Only main agent-loop assistant messages are timed. Compaction sub-calls and
   subagents run in separate sessions and are excluded.
-- Streams aborted before the first token are skipped.
+- Tool-call, failed, aborted, and empty streams are skipped; only completed visible responses are timed.
 
 ## License
 
