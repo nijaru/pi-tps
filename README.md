@@ -11,7 +11,7 @@ When enabled, pi-req-timer shows one timing line below each completed assistant 
 ## Metrics
 
 - **Latency** — time from request start to the first thinking or text token.
-- **Throughput** — output and reasoning tokens per second after the first token.
+- **Throughput** — reported output tokens per second after the first token.
 
 Tool calls and incomplete responses are omitted.
 

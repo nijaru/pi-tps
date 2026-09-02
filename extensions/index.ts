@@ -3,9 +3,8 @@
  * assistant messages, with session averages in the footer.
  *
  * - Measures TTFT from message_start to the first thinking/text delta event.
- * - Measures TPS as (output + reasoning tokens) / stream duration after the
- *   first token. Tokens are used only for the weighted average; they are not
- *   displayed anywhere (the footer already reports token usage).
+ * - Measures throughput as reported output tokens / stream duration after the
+ *   first token.
  * - Per-message timing renders as one line directly below each completed
  *   assistant response.
  * - Toggle with /timer [on|off|status|reset]. State persists in the session,
@@ -21,9 +20,10 @@ const METRIC_ENTRY = "req-timer";
 const STATUS_KEY = "req-timer";
 
 interface Metric {
+	version: 2;
 	ttftMs: number | undefined;
 	streamMs: number;
-	tokens: number;
+	outputTokens: number;
 	stopReason: string;
 }
 
@@ -43,17 +43,18 @@ const emptyAggregates = (): Aggregates => ({
 
 function isUsableMetric(m: Metric): boolean {
 	return (
+		m.version === 2 &&
 		m.ttftMs !== undefined &&
 		m.ttftMs >= 0 &&
 		m.streamMs > 0 &&
-		m.tokens > 0 &&
+		m.outputTokens > 0 &&
 		(m.stopReason === "stop" || m.stopReason === "length")
 	);
 }
 
 function record(agg: Aggregates, m: Metric): void {
 	if (!isUsableMetric(m)) return;
-	agg.totalTokens += m.tokens;
+	agg.totalTokens += m.outputTokens;
 	agg.totalStreamMs += m.streamMs;
 	agg.ttftSumMs += m.ttftMs!;
 	agg.ttftCount += 1;
@@ -118,9 +119,11 @@ export default function (pi: ExtensionAPI) {
 		if (message.role !== "assistant") return;
 
 		const metric: Metric = {
+			version: 2,
 			ttftMs: started.firstDeltaMs !== undefined ? started.firstDeltaMs - started.startMs : undefined,
 			streamMs: started.firstDeltaMs !== undefined ? Date.now() - started.firstDeltaMs : 0,
-			tokens: (message.usage?.output ?? 0) + (message.usage?.reasoning ?? 0),
+			// pi-ai defines reasoning as a subset of output, not an additional count.
+			outputTokens: message.usage?.output ?? 0,
 			stopReason: message.stopReason ?? "unknown",
 		};
 		// Only completed visible responses have meaningful latency/throughput.
@@ -187,7 +190,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerEntryRenderer(METRIC_ENTRY, (entry, _opts, theme) => {
 		const m = entry.data as Metric;
 		if (!active || !isUsableMetric(m)) return new Text("");
-		return new Text(theme.fg("dim", `⏱ ${fmtSeconds(m.ttftMs!)} · ${fmtTps(m.tokens, m.streamMs)} tok/s`));
+		return new Text(theme.fg("dim", `⏱ ${fmtSeconds(m.ttftMs!)} · ${fmtTps(m.outputTokens, m.streamMs)} tok/s`));
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
