@@ -2,16 +2,10 @@
 
 Per-request latency and throughput timing for [pi](https://github.com/earendil-works/pi).
 
-When enabled, each assistant message gets a collapsible timing entry in the transcript (collapsed by default, like thinking blocks — `ctrl+o` expands):
+When enabled, each assistant message gets a one-line timing entry in the transcript:
 
 ```
-⏱ 0.42s · 45.3 tok/s
-```
-
-Expanded, it shows the full breakdown:
-
-```
-⏱ ttft 0.42s · 45.3 tok/s over 8.2s
+⏱ ttft 0.42s · 45.3 tok/s
 ```
 
 While active, the footer shows token-weighted session averages:

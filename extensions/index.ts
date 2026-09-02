@@ -156,16 +156,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Collapsed by default like thinking blocks; ctrl+o expands the full detail.
-	pi.registerEntryRenderer(METRIC_ENTRY, (entry, { expanded }, theme) => {
+	// One fixed line per message; the /timer toggle controls visibility entirely.
+	// Abnormal stop reasons get a suffix since they change how to read the numbers.
+	pi.registerEntryRenderer(METRIC_ENTRY, (entry, _opts, theme) => {
 		const m = entry.data as Metric;
-		if (expanded) {
-			const ttft = m.ttftMs !== undefined ? fmtSeconds(m.ttftMs) : "n/a";
-			const suffix = m.stopReason !== "stop" ? ` · ${m.stopReason}` : "";
-			return new Text(theme.fg("dim", `⏱ ttft ${ttft} · ${fmtTps(m.tokens, m.streamMs)} tok/s over ${fmtSeconds(m.streamMs)}${suffix}`));
-		}
 		const ttft = m.ttftMs !== undefined ? fmtSeconds(m.ttftMs) : "n/a";
-		return new Text(theme.fg("dim", `⏱ ${ttft} · ${fmtTps(m.tokens, m.streamMs)} tok/s`));
+		const suffix = m.stopReason !== "stop" ? ` · ${m.stopReason}` : "";
+		return new Text(theme.fg("dim", `⏱ ttft ${ttft} · ${fmtTps(m.tokens, m.streamMs)} tok/s${suffix}`));
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
