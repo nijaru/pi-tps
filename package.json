@@ -1,0 +1,46 @@
+{
+  "name": "pi-req-timer",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Per-request TTFT and throughput timing for pi, with session averages in the footer.",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "timing",
+    "ttft",
+    "latency",
+    "throughput"
+  ],
+  "license": "MIT",
+  "author": "Nick Naru <nick@nijaru.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nijaru/pi-req-timer.git"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "lint": "oxlint extensions/",
+    "typecheck": "tsc --noEmit",
+    "check": "oxlint extensions/ && tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
+    "@earendil-works/pi-coding-agent": "0.84.4",
+    "oxlint": "latest",
+    "typescript": "^6.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ]
+}
