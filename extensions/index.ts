@@ -10,15 +10,22 @@
  *   assistant response.
  * - Toggle with /tps [on|off|status|reset]. State persists in the session,
  *   so it survives reloads and is restored on the correct branch after /tree.
+ *   The last-set value is also saved to ~/.pi/agent/extensions/pi-tps.json
+ *   so new sessions start with it.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 const STATE_ENTRY = "tps-state";
 const METRIC_ENTRY = "tps-metric";
 const STATUS_KEY = "tps";
+// Last-set on/off value shared across sessions, mirroring pi-fast-mode.
+const GLOBAL_STATE_PATH = join(homedir(), ".pi", "agent", "extensions", "pi-tps.json");
 
 interface Metric {
 	version: 3;
@@ -88,6 +95,28 @@ function fmtTps(tokens: number, ms: number): string {
 	return tps >= 100 ? String(Math.round(tps)) : tps.toFixed(1);
 }
 
+function readGlobalState(): boolean | undefined {
+	try {
+		const parsed = JSON.parse(readFileSync(GLOBAL_STATE_PATH, "utf8")) as unknown;
+		if (typeof parsed !== "object" || parsed === null) return undefined;
+		const active = (parsed as { active?: unknown }).active;
+		return typeof active === "boolean" ? active : undefined;
+	} catch {
+		// Missing or unreadable file: treat as never set.
+		return undefined;
+	}
+}
+
+function writeGlobalState(active: boolean): void {
+	try {
+		mkdirSync(dirname(GLOBAL_STATE_PATH), { recursive: true });
+		writeFileSync(GLOBAL_STATE_PATH, `${JSON.stringify({ active }, null, 2)}\n`, "utf8");
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.warn(`[${STATUS_KEY}] failed to save global timing state: ${message}`);
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	let active = false;
 	let requestStartMs: number | undefined;
@@ -110,6 +139,16 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		return result;
+	}
+
+	function activeFromBranch(ctx: ExtensionContext): boolean | undefined {
+		let saved: boolean | undefined;
+		for (const entry of ctx.sessionManager.getBranch()) {
+			if (entry.type === "custom" && entry.customType === STATE_ENTRY && entry.data) {
+				saved = (entry.data as { active?: boolean }).active === true;
+			}
+		}
+		return saved;
 	}
 
 	function updateFooter(ctx: ExtensionContext): void {
@@ -226,6 +265,7 @@ export default function (pi: ExtensionAPI) {
 					return;
 			}
 			pi.appendEntry(STATE_ENTRY, { active });
+			writeGlobalState(active);
 			if (active) agg = aggregatesFromBranch(ctx);
 			updateFooter(ctx);
 			ctx.ui.notify(`Request timing ${active ? "on" : "off"}.`, "info");
@@ -241,16 +281,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type === "custom" && entry.customType === STATE_ENTRY && entry.data) {
-				active = (entry.data as { active?: boolean }).active === true;
-			}
-		}
+		const saved = activeFromBranch(ctx);
+		// Sessions without recorded state seed from the global value so they
+		// start as /tps was last set; once recorded, the session entry wins.
+		active = saved ?? readGlobalState() ?? false;
+		if (saved === undefined) pi.appendEntry(STATE_ENTRY, { active });
 		agg = aggregatesFromBranch(ctx);
 		updateFooter(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
+		active = activeFromBranch(ctx) ?? active;
 		agg = aggregatesFromBranch(ctx);
 		updateFooter(ctx);
 	});

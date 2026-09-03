@@ -25,7 +25,7 @@ Tool calls and incomplete responses are omitted.
 /tps reset    Clear session averages
 ```
 
-Timing state and measurements persist with the session and follow the active branch after `/reload` or `/tree` navigation.
+Timing state and measurements persist with the session and follow the active branch after `/reload` or `/tree` navigation. The last on/off value is also saved to `~/.pi/agent/extensions/pi-tps.json`, so new sessions start with timing as it was last set.
 
 ## Install
 
