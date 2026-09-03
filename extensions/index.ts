@@ -259,7 +259,10 @@ export default function (pi: ExtensionAPI) {
 					ctx.ui.notify("Timing averages reset.", "info");
 					return;
 				case "status":
-					break;
+					// Read-only: report without appending a redundant state entry
+					// or rewriting the global value.
+					ctx.ui.notify(`Request timing ${active ? "on" : "off"}.`, "info");
+					return;
 				default:
 					ctx.ui.notify("Usage: /tps [on|off|status|reset]", "error");
 					return;
