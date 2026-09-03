@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "pi-req-timer",
+      "name": "pi-tps",
       "devDependencies": {
         "@earendil-works/pi-ai": "0.84.4",
         "@earendil-works/pi-coding-agent": "0.84.4",

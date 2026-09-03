@@ -1,8 +1,8 @@
-# pi-req-timer
+# pi-tps
 
 Per-request latency and throughput timing for [pi](https://github.com/earendil-works/pi).
 
-When enabled, pi-req-timer shows one timing line below each completed assistant response in the transcript. The footer shows the averages for the current session using the same format:
+When enabled, pi-tps shows one timing line below each completed assistant response in the transcript. The footer shows the averages for the current session using the same format:
 
 ```text
 ⏱ 8.82s · 27.2 tok/s
@@ -18,11 +18,11 @@ Tool calls and incomplete responses are omitted.
 ## Usage
 
 ```text
-/timer          Toggle timing on or off
-/timer on       Enable timing
-/timer off      Disable timing
-/timer status   Show timing status
-/timer reset    Clear session averages
+/tps          Toggle timing on or off
+/tps on       Enable timing
+/tps off      Disable timing
+/tps status   Show timing status
+/tps reset    Clear session averages
 ```
 
 Timing state and measurements persist with the session and follow the active branch after `/reload` or `/tree` navigation.
@@ -30,7 +30,7 @@ Timing state and measurements persist with the session and follow the active bra
 ## Install
 
 ```text
-pi install git:github.com/nijaru/pi-req-timer
+pi install git:github.com/nijaru/pi-tps
 ```
 
 ## License

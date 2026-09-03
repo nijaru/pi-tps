@@ -1,5 +1,5 @@
 /**
- * pi-req-timer: per-request latency (TTFT) and throughput (tokens/sec) for
+ * pi-tps: per-request latency (TTFT) and throughput (tokens/sec) for
  * assistant messages, with session averages in the footer.
  *
  * - Measures latency from the provider request start to the first thinking/text
@@ -8,7 +8,7 @@
  *   the provider hides reasoning tokens.
  * - Per-message timing renders as one line directly below each completed
  *   assistant response.
- * - Toggle with /timer [on|off|status|reset]. State persists in the session,
+ * - Toggle with /tps [on|off|status|reset]. State persists in the session,
  *   so it survives reloads and is restored on the correct branch after /tree.
  */
 
@@ -16,9 +16,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 
-const STATE_ENTRY = "req-timer-state";
-const METRIC_ENTRY = "req-timer";
-const STATUS_KEY = "req-timer";
+const STATE_ENTRY = "tps-state";
+const METRIC_ENTRY = "tps-metric";
+const STATUS_KEY = "tps";
 
 interface Metric {
 	version: 3;
@@ -197,8 +197,8 @@ export default function (pi: ExtensionAPI) {
 		while (pendingMetrics.length > 0) flushMetric();
 	});
 
-	pi.registerCommand("timer", {
-		description: "Toggle request timing; /timer [on|off|status|reset]",
+	pi.registerCommand("tps", {
+		description: "Toggle request timing; /tps [on|off|status|reset]",
 		getArgumentCompletions: (prefix) => {
 			const values = ["on", "off", "status", "reset"];
 			const items = values.filter((v) => v.startsWith(prefix.trim().toLowerCase()));
@@ -222,7 +222,7 @@ export default function (pi: ExtensionAPI) {
 				case "status":
 					break;
 				default:
-					ctx.ui.notify("Usage: /timer [on|off|status|reset]", "error");
+					ctx.ui.notify("Usage: /tps [on|off|status|reset]", "error");
 					return;
 			}
 			pi.appendEntry(STATE_ENTRY, { active });
@@ -232,7 +232,7 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// One fixed line per message. The /timer toggle controls visibility for
+	// One fixed line per message. The /tps toggle controls visibility for
 	// existing and future rows alike; there is no alternate display format.
 	pi.registerEntryRenderer(METRIC_ENTRY, (entry, _opts, theme) => {
 		const m = entry.data as Metric;

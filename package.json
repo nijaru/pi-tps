@@ -1,8 +1,8 @@
 {
-  "name": "pi-req-timer",
+  "name": "pi-tps",
   "version": "0.1.0",
   "type": "module",
-  "description": "Per-request TTFT and throughput timing for pi, with session averages in the footer.",
+  "description": "Per-request TTFT and tokens-per-second for pi, with session averages in the footer.",
   "keywords": [
     "pi-package",
     "pi",
@@ -16,7 +16,7 @@
   "author": "Nick Naru <nick@nijaru.com>",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nijaru/pi-req-timer.git"
+    "url": "https://github.com/nijaru/pi-tps.git"
   },
   "pi": {
     "extensions": [
