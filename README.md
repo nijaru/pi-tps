@@ -8,10 +8,6 @@ When enabled, pi-tps shows one timing line below each completed assistant respon
 ⏱ 8.82s · 27.2 tok/s
 ```
 
-When timing is on but there are no measurements yet (a fresh session,
-or right after `/tps reset`), the footer shows `⏱ on` so the armed state
-stays visible.
-
 ## Metrics
 
 - **Latency** — time from request start to the first thinking or text token.
