@@ -152,8 +152,16 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function updateFooter(ctx: ExtensionContext): void {
-		if (!active || agg.ttftCount === 0) {
+		if (!active) {
 			ctx.ui.setStatus(STATUS_KEY, undefined);
+			return;
+		}
+		if (agg.ttftCount === 0) {
+			// Armed but no completed responses yet (e.g. a new session
+				// seeded on from the global value, or right after /tps reset).
+				// Keep a visible indicator so "on" reads as on, mirroring
+				// /fast's persistent footer status.
+			ctx.ui.setStatus(STATUS_KEY, "⏱ on");
 			return;
 		}
 		ctx.ui.setStatus(
