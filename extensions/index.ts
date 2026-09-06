@@ -5,29 +5,37 @@
  * - Measures latency from the provider request start to the first thinking/text
  *   delta event.
  * - Measures throughput over the emitted stream, or over the full request when
- *   the provider hides reasoning tokens.
+ *   the provider hides reasoning tokens from the stream.
  * - Per-message timing renders as one line directly below each completed
  *   assistant response.
  * - Toggle with /tps [on|off|status|reset]. State persists in the session,
  *   so it survives reloads and is restored on the correct branch after /tree.
- *   The last-set value is also saved to ~/.pi/agent/extensions/pi-tps.json
- *   so new sessions start with it.
+ *   The last-set value is also saved under the agent config directory
+ *   (pi-tps.json) so new sessions start with it.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	getAgentDir,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const STATE_ENTRY = "tps-state";
-const METRIC_ENTRY = "tps-metric";
-const STATUS_KEY = "tps";
+export const STATE_ENTRY = "tps-state";
+export const METRIC_ENTRY = "tps-metric";
+export const RESET_ENTRY = "tps-reset";
+export const STATUS_KEY = "tps";
 // Last-set on/off value shared across sessions, mirroring pi-fast-mode.
-const GLOBAL_STATE_PATH = join(homedir(), ".pi", "agent", "extensions", "pi-tps.json");
+const GLOBAL_STATE_PATH = join(getAgentDir(), "extensions", "pi-tps.json");
 
-interface Metric {
+/** APIs that can report hidden reasoning tokens even while emitting reasoning summaries. */
+const REQUEST_BASIS_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
+
+export interface Metric {
 	version: 3;
 	ttftMs: number | undefined;
 	rateMs: number;
@@ -36,21 +44,21 @@ interface Metric {
 	rateBasis: "stream" | "request";
 }
 
-interface Aggregates {
+export interface Aggregates {
 	totalTokens: number;
 	totalRateMs: number;
 	ttftSumMs: number;
 	ttftCount: number;
 }
 
-const emptyAggregates = (): Aggregates => ({
+export const emptyAggregates = (): Aggregates => ({
 	totalTokens: 0,
 	totalRateMs: 0,
 	ttftSumMs: 0,
 	ttftCount: 0,
 });
 
-function isUsableMetric(m: Metric): boolean {
+export function isUsableMetric(m: Metric): boolean {
 	return (
 		m.version === 3 &&
 		m.ttftMs !== undefined &&
@@ -61,23 +69,25 @@ function isUsableMetric(m: Metric): boolean {
 	);
 }
 
-function chooseRateBasis(
+export function chooseRateBasis(
 	api: string | undefined,
 	sawThinkingDelta: boolean,
 	reasoningTokens: number,
 ): "stream" | "request" {
 	if (reasoningTokens <= 0) return "stream";
 
-	// OpenAI Responses can report hidden reasoning tokens even when it emits a
-	// reasoning summary. Include the full request window for that output.
-	if (api === "openai-responses" || api === "openai-codex-responses") return "request";
+	// Responses-style APIs can report hidden reasoning tokens even when they
+	// emit a reasoning summary. Include the full request window for that output.
+	// Azure uses the same Responses protocol and reasoning token accounting as
+	// OpenAI (openai-responses-shared), so it gets the same treatment.
+	if (api !== undefined && REQUEST_BASIS_APIS.has(api)) return "request";
 
 	// For other APIs, a thinking delta means reasoning was part of the emitted
 	// stream. Without one, assume reported reasoning happened before first text.
 	return sawThinkingDelta ? "stream" : "request";
 }
 
-function record(agg: Aggregates, m: Metric): void {
+export function record(agg: Aggregates, m: Metric): void {
 	if (!isUsableMetric(m)) return;
 	agg.totalTokens += m.outputTokens;
 	agg.totalRateMs += m.rateMs;
@@ -85,19 +95,19 @@ function record(agg: Aggregates, m: Metric): void {
 	agg.ttftCount += 1;
 }
 
-function fmtSeconds(ms: number): string {
+export function fmtSeconds(ms: number): string {
 	return `${(ms / 1000).toFixed(2)}s`;
 }
 
-function fmtTps(tokens: number, ms: number): string {
+export function fmtTps(tokens: number, ms: number): string {
 	if (ms <= 0) return "?";
 	const tps = tokens / (ms / 1000);
 	return tps >= 100 ? String(Math.round(tps)) : tps.toFixed(1);
 }
 
-function readGlobalState(): boolean | undefined {
+export function readGlobalState(path = GLOBAL_STATE_PATH): boolean | undefined {
 	try {
-		const parsed = JSON.parse(readFileSync(GLOBAL_STATE_PATH, "utf8")) as unknown;
+		const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
 		if (typeof parsed !== "object" || parsed === null) return undefined;
 		const active = (parsed as { active?: unknown }).active;
 		return typeof active === "boolean" ? active : undefined;
@@ -107,49 +117,58 @@ function readGlobalState(): boolean | undefined {
 	}
 }
 
-function writeGlobalState(active: boolean): void {
+export function writeGlobalState(active: boolean, path = GLOBAL_STATE_PATH): void {
 	try {
-		mkdirSync(dirname(GLOBAL_STATE_PATH), { recursive: true });
-		writeFileSync(GLOBAL_STATE_PATH, `${JSON.stringify({ active }, null, 2)}\n`, "utf8");
+		mkdirSync(dirname(path), { recursive: true });
+		writeFileSync(path, `${JSON.stringify({ active }, null, 2)}\n`, "utf8");
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		console.warn(`[${STATUS_KEY}] failed to save global timing state: ${message}`);
 	}
 }
 
-export default function (pi: ExtensionAPI) {
+function customDataOf(entry: SessionEntry, customType: string): unknown {
+	if (entry.type !== "custom" || entry.customType !== customType) return undefined;
+	// Treat null like missing data so branch scans never cast null to Metric.
+	return entry.data ?? undefined;
+}
+
+/** Restore the latest on/off state recorded on the active session branch. */
+export function activeFromBranch(entries: readonly SessionEntry[]): boolean | undefined {
+	let saved: boolean | undefined;
+	for (const entry of entries) {
+		const data = customDataOf(entry, STATE_ENTRY);
+		if (data !== undefined && typeof data === "object" && data !== null) {
+			saved = (data as { active?: unknown }).active === true;
+		}
+	}
+	return saved;
+}
+
+/** Recompute session aggregates from the active branch, honoring the latest reset marker. */
+export function aggregatesFromBranch(entries: readonly SessionEntry[]): Aggregates {
+	let result = emptyAggregates();
+	for (const entry of entries) {
+		if (customDataOf(entry, RESET_ENTRY) !== undefined) result = emptyAggregates();
+		const metric = customDataOf(entry, METRIC_ENTRY);
+		if (metric !== undefined) record(result, metric as Metric);
+	}
+	return result;
+}
+
+export default function piTps(pi: ExtensionAPI) {
 	let active = false;
 	let requestStartMs: number | undefined;
 	let pending:
 		| {
-			requestStartMs: number;
-			firstDeltaMs: number | undefined;
-			sawThinkingDelta: boolean;
-			api: string | undefined;
+				requestStartMs: number;
+				firstDeltaMs: number | undefined;
+				sawThinkingDelta: boolean;
+				api: string | undefined;
 		}
 		| undefined;
 	let pendingMetrics: Metric[] = [];
 	let agg = emptyAggregates();
-
-	function aggregatesFromBranch(ctx: ExtensionContext): Aggregates {
-		const result = emptyAggregates();
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type === "custom" && entry.customType === METRIC_ENTRY && entry.data) {
-				record(result, entry.data as Metric);
-			}
-		}
-		return result;
-	}
-
-	function activeFromBranch(ctx: ExtensionContext): boolean | undefined {
-		let saved: boolean | undefined;
-		for (const entry of ctx.sessionManager.getBranch()) {
-			if (entry.type === "custom" && entry.customType === STATE_ENTRY && entry.data) {
-				saved = (entry.data as { active?: boolean }).active === true;
-			}
-		}
-		return saved;
-	}
 
 	function updateFooter(ctx: ExtensionContext): void {
 		if (!active || agg.ttftCount === 0) {
@@ -255,6 +274,11 @@ export default function (pi: ExtensionAPI) {
 					break;
 				case "reset":
 					agg = emptyAggregates();
+					// Record the reset on the branch so reloads and /tree navigation
+					// keep the averages cleared. Metrics from an in-flight turn
+					// flush after the marker, keep their per-message rows, and count
+					// toward the fresh averages once the branch is recomputed.
+					pi.appendEntry(RESET_ENTRY, {});
 					updateFooter(ctx);
 					ctx.ui.notify("Timing averages reset.", "info");
 					return;
@@ -269,7 +293,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			pi.appendEntry(STATE_ENTRY, { active });
 			writeGlobalState(active);
-			if (active) agg = aggregatesFromBranch(ctx);
+			if (active) agg = aggregatesFromBranch(ctx.sessionManager.getBranch());
 			updateFooter(ctx);
 			ctx.ui.notify(`Request timing ${active ? "on" : "off"}.`, "info");
 		},
@@ -283,19 +307,24 @@ export default function (pi: ExtensionAPI) {
 		return new Text(theme.fg("dim", `⏱ ${fmtSeconds(m.ttftMs!)} · ${fmtTps(m.outputTokens, m.rateMs)} tok/s`));
 	});
 
+	// tps-reset entries are durable markers only; without a registered
+	// renderer, pi renders nothing for them in the transcript.
+
 	pi.on("session_start", async (_event, ctx) => {
-		const saved = activeFromBranch(ctx);
+		const entries = ctx.sessionManager.getBranch();
+		const saved = activeFromBranch(entries);
 		// Sessions without recorded state seed from the global value so they
 		// start as /tps was last set; once recorded, the session entry wins.
 		active = saved ?? readGlobalState() ?? false;
 		if (saved === undefined) pi.appendEntry(STATE_ENTRY, { active });
-		agg = aggregatesFromBranch(ctx);
+		agg = aggregatesFromBranch(entries);
 		updateFooter(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		active = activeFromBranch(ctx) ?? active;
-		agg = aggregatesFromBranch(ctx);
+		const entries = ctx.sessionManager.getBranch();
+		active = activeFromBranch(entries) ?? active;
+		agg = aggregatesFromBranch(entries);
 		updateFooter(ctx);
 	});
 

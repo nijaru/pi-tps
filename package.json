@@ -24,20 +24,23 @@
     ]
   },
   "scripts": {
-    "lint": "oxlint extensions/",
+    "test": "bun test",
+    "lint": "oxlint extensions/ tests/",
     "typecheck": "tsc --noEmit",
-    "check": "oxlint extensions/ && tsc --noEmit"
+    "check": "bun test && oxlint extensions/ tests/ && tsc --noEmit"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.84.4",
     "@earendil-works/pi-coding-agent": "0.84.4",
     "@earendil-works/pi-tui": "0.84.4",
+    "@types/bun": "latest",
     "oxlint": "latest",
     "typescript": "^6.0.3"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "files": [
     "extensions",
