@@ -2,22 +2,28 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
 	activeFromBranch,
 	aggregatesFromBranch,
+	ARMED_STATUS,
 	chooseRateBasis,
 	emptyAggregates,
 	fmtSeconds,
 	fmtTps,
 	isUsableMetric,
 	METRIC_ENTRY,
+	metricFromTiming,
+	metricLine,
 	readGlobalState,
 	record,
 	RESET_ENTRY,
 	STATE_ENTRY,
+	summaryLine,
 	writeGlobalState,
 	type Metric,
+	type PendingTiming,
 } from "../extensions/index.ts";
 
 /** Build a session-branch entry list from (customType, data) pairs. */
@@ -31,6 +37,23 @@ const metric = (overrides: Partial<Metric> = {}): Metric => ({
 	outputTokens: 272,
 	stopReason: "stop",
 	rateBasis: "stream",
+	...overrides,
+});
+
+const assistantMessage = (overrides: Partial<AssistantMessage> = {}): AssistantMessage =>
+	({
+		role: "assistant",
+		api: "anthropic-messages",
+		usage: { output: 100, reasoning: 0 },
+		stopReason: "stop",
+		...overrides,
+	}) as unknown as AssistantMessage;
+
+const timing = (overrides: Partial<PendingTiming> = {}): PendingTiming => ({
+	requestStartMs: 1000,
+	firstDeltaMs: 1500,
+	sawThinkingDelta: false,
+	api: "anthropic-messages",
 	...overrides,
 });
 
@@ -141,6 +164,10 @@ describe("aggregatesFromBranch", () => {
 		);
 		expect(agg).toEqual({ totalTokens: 25, totalRateMs: 500, ttftSumMs: 250, ttftCount: 1 });
 	});
+	test("a reset marker with null data still clears", () => {
+		const agg = aggregatesFromBranch(branch([METRIC_ENTRY, metric()], [RESET_ENTRY, null]));
+		expect(agg).toEqual(emptyAggregates());
+	});
 	test("multiple resets keep only metrics after the latest", () => {
 		const agg = aggregatesFromBranch(
 			branch(
@@ -192,6 +219,54 @@ describe("global state", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("metricFromTiming", () => {
+	test("uses the stream window after the first delta", () => {
+		expect(metricFromTiming(timing(), assistantMessage(), 6000)).toEqual({
+			version: 3,
+			ttftMs: 500,
+			rateMs: 4500,
+			outputTokens: 100,
+			stopReason: "stop",
+			rateBasis: "stream",
+		});
+	});
+	test("uses the full request window when reasoning is hidden", () => {
+		const m = metricFromTiming(
+			timing({ api: "openai-responses" }),
+			assistantMessage({ usage: { output: 100, reasoning: 40 } as AssistantMessage["usage"] }),
+			6000,
+		);
+		expect(m.ttftMs).toBe(500);
+		expect(m.rateMs).toBe(5000);
+		expect(m.rateBasis).toBe("request");
+	});
+	test("leaves TTFT undefined and rate zero when no delta arrived", () => {
+		const m = metricFromTiming(timing({ firstDeltaMs: undefined }), assistantMessage(), 6000);
+		expect(m.ttftMs).toBeUndefined();
+		expect(m.rateMs).toBe(0);
+	});
+});
+
+describe("metricLine", () => {
+	test("formats a usable metric", () => {
+		expect(metricLine(metric())).toBe("⏱ 1.00s · 27.2 tok/s");
+	});
+	test("returns undefined for unusable metrics", () => {
+		expect(metricLine(metric({ stopReason: "toolUse" }))).toBeUndefined();
+	});
+});
+
+describe("summaryLine", () => {
+	test("shows the armed indicator before the first measurement", () => {
+		expect(summaryLine(emptyAggregates())).toBe(ARMED_STATUS);
+	});
+	test("shows averages once measurements exist", () => {
+		expect(summaryLine({ totalTokens: 272, totalRateMs: 10_000, ttftSumMs: 8820, ttftCount: 1 })).toBe(
+			"⏱ 8.82s · 27.2 tok/s",
+		);
 	});
 });
 

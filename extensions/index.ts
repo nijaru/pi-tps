@@ -12,6 +12,8 @@
  *   so it survives reloads and is restored on the correct branch after /tree.
  *   The last-set value is also saved under the agent config directory
  *   (pi-tps.json) so new sessions start with it.
+ * - While enabled with no measurements yet, the footer shows "⏱ on" so the
+ *   armed state stays visible.
  */
 
 import {
@@ -29,6 +31,7 @@ export const STATE_ENTRY = "tps-state";
 export const METRIC_ENTRY = "tps-metric";
 export const RESET_ENTRY = "tps-reset";
 export const STATUS_KEY = "tps";
+export const ARMED_STATUS = "⏱ on";
 // Last-set on/off value shared across sessions, mirroring pi-fast-mode.
 const GLOBAL_STATE_PATH = join(getAgentDir(), "extensions", "pi-tps.json");
 
@@ -49,6 +52,14 @@ export interface Aggregates {
 	totalRateMs: number;
 	ttftSumMs: number;
 	ttftCount: number;
+}
+
+/** In-flight request timing, captured between message_start and message_end. */
+export interface PendingTiming {
+	requestStartMs: number;
+	firstDeltaMs: number | undefined;
+	sawThinkingDelta: boolean;
+	api: string | undefined;
 }
 
 export const emptyAggregates = (): Aggregates => ({
@@ -91,7 +102,7 @@ export function record(agg: Aggregates, m: Metric): void {
 	if (!isUsableMetric(m)) return;
 	agg.totalTokens += m.outputTokens;
 	agg.totalRateMs += m.rateMs;
-	agg.ttftSumMs += m.ttftMs!;
+	agg.ttftSumMs += m.ttftMs ?? 0;
 	agg.ttftCount += 1;
 }
 
@@ -103,6 +114,37 @@ export function fmtTps(tokens: number, ms: number): string {
 	if (ms <= 0) return "?";
 	const tps = tokens / (ms / 1000);
 	return tps >= 100 ? String(Math.round(tps)) : tps.toFixed(1);
+}
+
+/** One line for a finished request, or undefined when it is not worth showing. */
+export function metricLine(m: Metric): string | undefined {
+	if (!isUsableMetric(m)) return undefined;
+	return `⏱ ${fmtSeconds(m.ttftMs ?? 0)} · ${fmtTps(m.outputTokens, m.rateMs)} tok/s`;
+}
+
+/** Footer line for the session: averages, or the armed indicator before the first measurement. */
+export function summaryLine(agg: Aggregates): string {
+	if (agg.ttftCount === 0) return ARMED_STATUS;
+	return `⏱ ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s`;
+}
+
+/** Turn captured timing plus the finished message into a persistable metric. */
+export function metricFromTiming(pending: PendingTiming, message: AssistantMessage, endMs: number): Metric {
+	const { firstDeltaMs } = pending;
+	const rateBasis = chooseRateBasis(
+		pending.api ?? message.api,
+		pending.sawThinkingDelta,
+		message.usage?.reasoning ?? 0,
+	);
+	return {
+		version: 3,
+		ttftMs: firstDeltaMs === undefined ? undefined : firstDeltaMs - pending.requestStartMs,
+		rateMs: rateBasis === "request" ? endMs - pending.requestStartMs : firstDeltaMs === undefined ? 0 : endMs - firstDeltaMs,
+		// pi-ai defines reasoning as a subset of output, not an additional count.
+		outputTokens: message.usage?.output ?? 0,
+		stopReason: message.stopReason ?? "unknown",
+		rateBasis,
+	};
 }
 
 export function readGlobalState(path = GLOBAL_STATE_PATH): boolean | undefined {
@@ -127,58 +169,54 @@ export function writeGlobalState(active: boolean, path = GLOBAL_STATE_PATH): voi
 	}
 }
 
-function customDataOf(entry: SessionEntry, customType: string): unknown {
-	if (entry.type !== "custom" || entry.customType !== customType) return undefined;
-	// Treat null like missing data so branch scans never cast null to Metric.
-	return entry.data ?? undefined;
+interface BranchState {
+	active: boolean | undefined;
+	agg: Aggregates;
+}
+
+/** One pass over the branch: latest on/off state plus aggregates honoring the latest reset. */
+function scanBranch(entries: readonly SessionEntry[]): BranchState {
+	let active: boolean | undefined;
+	let agg = emptyAggregates();
+	for (const entry of entries) {
+		if (entry.type !== "custom") continue;
+		switch (entry.customType) {
+			case STATE_ENTRY:
+				// Treat null like missing data so branch scans never cast null to a state.
+				if (typeof entry.data === "object" && entry.data !== null) {
+					active = (entry.data as { active?: unknown }).active === true;
+				}
+				break;
+			case RESET_ENTRY:
+				agg = emptyAggregates();
+				break;
+			case METRIC_ENTRY:
+				if (typeof entry.data === "object" && entry.data !== null) record(agg, entry.data as Metric);
+				break;
+		}
+	}
+	return { active, agg };
 }
 
 /** Restore the latest on/off state recorded on the active session branch. */
 export function activeFromBranch(entries: readonly SessionEntry[]): boolean | undefined {
-	let saved: boolean | undefined;
-	for (const entry of entries) {
-		const data = customDataOf(entry, STATE_ENTRY);
-		if (data !== undefined && typeof data === "object" && data !== null) {
-			saved = (data as { active?: unknown }).active === true;
-		}
-	}
-	return saved;
+	return scanBranch(entries).active;
 }
 
 /** Recompute session aggregates from the active branch, honoring the latest reset marker. */
 export function aggregatesFromBranch(entries: readonly SessionEntry[]): Aggregates {
-	let result = emptyAggregates();
-	for (const entry of entries) {
-		if (customDataOf(entry, RESET_ENTRY) !== undefined) result = emptyAggregates();
-		const metric = customDataOf(entry, METRIC_ENTRY);
-		if (metric !== undefined) record(result, metric as Metric);
-	}
-	return result;
+	return scanBranch(entries).agg;
 }
 
 export default function piTps(pi: ExtensionAPI) {
 	let active = false;
 	let requestStartMs: number | undefined;
-	let pending:
-		| {
-				requestStartMs: number;
-				firstDeltaMs: number | undefined;
-				sawThinkingDelta: boolean;
-				api: string | undefined;
-		}
-		| undefined;
+	let pending: PendingTiming | undefined;
 	let pendingMetrics: Metric[] = [];
 	let agg = emptyAggregates();
 
 	function updateFooter(ctx: ExtensionContext): void {
-		if (!active || agg.ttftCount === 0) {
-			ctx.ui.setStatus(STATUS_KEY, undefined);
-			return;
-		}
-		ctx.ui.setStatus(
-			STATUS_KEY,
-			`⏱ ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s`,
-		);
+		ctx.ui.setStatus(STATUS_KEY, active ? summaryLine(agg) : undefined);
 	}
 
 	pi.on("before_provider_request", async () => {
@@ -186,11 +224,9 @@ export default function piTps(pi: ExtensionAPI) {
 	});
 
 	pi.on("message_start", async (event) => {
-		if (!active) return;
-		if (event.message.role !== "assistant") return;
-		const now = Date.now();
+		if (!active || event.message.role !== "assistant") return;
 		pending = {
-			requestStartMs: requestStartMs ?? now,
+			requestStartMs: requestStartMs ?? Date.now(),
 			firstDeltaMs: undefined,
 			sawThinkingDelta: false,
 			api: event.message.api,
@@ -200,37 +236,22 @@ export default function piTps(pi: ExtensionAPI) {
 
 	pi.on("message_update", async (event) => {
 		if (!pending || pending.firstDeltaMs !== undefined) return;
-		const t = event.assistantMessageEvent.type;
-		if (t === "thinking_delta") {
+		const type = event.assistantMessageEvent.type;
+		if (type === "thinking_delta") {
 			pending.firstDeltaMs = Date.now();
 			pending.sawThinkingDelta = true;
-		} else if (t === "text_delta") {
+		} else if (type === "text_delta") {
 			pending.firstDeltaMs = Date.now();
 		}
 	});
 
 	pi.on("message_end", async (event, ctx) => {
+		if (event.message.role !== "assistant") return;
 		const started = pending;
 		pending = undefined;
 		if (!started) return;
-		const message = event.message as AssistantMessage;
-		if (message.role !== "assistant") return;
 
-		const now = Date.now();
-		const firstDeltaMs = started.firstDeltaMs;
-		const streamMs = firstDeltaMs !== undefined ? now - firstDeltaMs : 0;
-		const requestMs = now - started.requestStartMs;
-		const reasoningTokens = message.usage?.reasoning ?? 0;
-		const rateBasis = chooseRateBasis(started.api ?? message.api, started.sawThinkingDelta, reasoningTokens);
-		const metric: Metric = {
-			version: 3,
-			ttftMs: firstDeltaMs !== undefined ? firstDeltaMs - started.requestStartMs : undefined,
-			rateMs: rateBasis === "request" ? requestMs : streamMs,
-			// pi-ai defines reasoning as a subset of output, not an additional count.
-			outputTokens: message.usage?.output ?? 0,
-			stopReason: message.stopReason ?? "unknown",
-			rateBasis,
-		};
+		const metric = metricFromTiming(started, event.message, Date.now());
 		// Only completed visible responses have meaningful latency/throughput.
 		// Tool-call, failed, aborted, and empty streams must not create rows or
 		// contaminate the session averages.
@@ -274,10 +295,10 @@ export default function piTps(pi: ExtensionAPI) {
 					break;
 				case "reset":
 					agg = emptyAggregates();
-					// Record the reset on the branch so reloads and /tree navigation
-					// keep the averages cleared. Metrics from an in-flight turn
-					// flush after the marker, keep their per-message rows, and count
-					// toward the fresh averages once the branch is recomputed.
+					// A metric measured earlier in the same turn flushes after this
+					// marker, so it survives a reload and counts toward the fresh
+					// averages. Re-record it now to keep the live footer consistent.
+					for (const metric of pendingMetrics) record(agg, metric);
 					pi.appendEntry(RESET_ENTRY, {});
 					updateFooter(ctx);
 					ctx.ui.notify("Timing averages reset.", "info");
@@ -300,31 +321,32 @@ export default function piTps(pi: ExtensionAPI) {
 	});
 
 	// One fixed line per message. The /tps toggle controls visibility for
-	// existing and future rows alike; there is no alternate display format.
+	// rows rendered after it changes and for the whole transcript after a
+	// reload or /tree rebuild. Returning undefined keeps hidden rows from
+	// leaving a blank spacer in the transcript.
 	pi.registerEntryRenderer(METRIC_ENTRY, (entry, _opts, theme) => {
-		const m = entry.data as Metric;
-		if (!active || !isUsableMetric(m)) return new Text("");
-		return new Text(theme.fg("dim", `⏱ ${fmtSeconds(m.ttftMs!)} · ${fmtTps(m.outputTokens, m.rateMs)} tok/s`));
+		if (!active) return undefined;
+		const line = metricLine(entry.data as Metric);
+		return line === undefined ? undefined : new Text(theme.fg("dim", line));
 	});
 
 	// tps-reset entries are durable markers only; without a registered
 	// renderer, pi renders nothing for them in the transcript.
 
 	pi.on("session_start", async (_event, ctx) => {
-		const entries = ctx.sessionManager.getBranch();
-		const saved = activeFromBranch(entries);
+		const state = scanBranch(ctx.sessionManager.getBranch());
 		// Sessions without recorded state seed from the global value so they
 		// start as /tps was last set; once recorded, the session entry wins.
-		active = saved ?? readGlobalState() ?? false;
-		if (saved === undefined) pi.appendEntry(STATE_ENTRY, { active });
-		agg = aggregatesFromBranch(entries);
+		active = state.active ?? readGlobalState() ?? false;
+		if (state.active === undefined) pi.appendEntry(STATE_ENTRY, { active });
+		agg = state.agg;
 		updateFooter(ctx);
 	});
 
 	pi.on("session_tree", async (_event, ctx) => {
-		const entries = ctx.sessionManager.getBranch();
-		active = activeFromBranch(entries) ?? active;
-		agg = aggregatesFromBranch(entries);
+		const state = scanBranch(ctx.sessionManager.getBranch());
+		active = state.active ?? active;
+		agg = state.agg;
 		updateFooter(ctx);
 	});
 
