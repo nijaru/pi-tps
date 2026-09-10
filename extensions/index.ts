@@ -115,10 +115,22 @@ export function fmtTps(tokens: number, ms: number): string {
 	return tps >= 100 ? String(Math.round(tps)) : tps.toFixed(1);
 }
 
+/** Add metrics measured this turn that are not yet persisted as branch entries. */
+export function recordInFlight(agg: Aggregates, inFlight: readonly Metric[]): void {
+	for (const metric of inFlight) record(agg, metric);
+}
+
 /** One line for a finished request, or undefined when it is not worth showing. */
 export function metricLine(m: Metric): string | undefined {
 	if (!isUsableMetric(m)) return undefined;
 	return `⏱ ${fmtSeconds(m.ttftMs ?? 0)} · ${fmtTps(m.outputTokens, m.rateMs)} tok/s`;
+}
+
+/** One line for a persisted metric entry, or undefined when there is nothing to show. */
+export function entryMetricLine(data: unknown): string | undefined {
+	// Session files are user-editable, so never hand a non-object to metricLine.
+	if (typeof data !== "object" || data === null) return undefined;
+	return metricLine(data as Metric);
 }
 
 /** Footer line for the session: averages, or undefined before the first measurement. */
@@ -208,7 +220,11 @@ export function aggregatesFromBranch(entries: readonly SessionEntry[]): Aggregat
 }
 
 export default function piTps(pi: ExtensionAPI) {
-	let active = false;
+	// Row visibility gating. Seeded from the shared last-set value because pi
+	// rebuilds the transcript from session entries before emitting session_start
+	// on /reload, /resume, and /fork, where a hardcoded false would hide every
+	// persisted row. session_start then replaces it with the branch value.
+	let active = readGlobalState() ?? false;
 	let requestStartMs: number | undefined;
 	let pending: PendingTiming | undefined;
 	let pendingMetrics: Metric[] = [];
@@ -297,7 +313,7 @@ export default function piTps(pi: ExtensionAPI) {
 					// A metric measured earlier in the same turn flushes after this
 					// marker, so it survives a reload and counts toward the fresh
 					// averages. Re-record it now to keep the live footer consistent.
-					for (const metric of pendingMetrics) record(agg, metric);
+					recordInFlight(agg, pendingMetrics);
 					pi.appendEntry(RESET_ENTRY, {});
 					updateFooter(ctx);
 					ctx.ui.notify("Timing averages reset.", "info");
@@ -313,7 +329,12 @@ export default function piTps(pi: ExtensionAPI) {
 			}
 			pi.appendEntry(STATE_ENTRY, { active });
 			writeGlobalState(active);
-			if (active) agg = aggregatesFromBranch(ctx.sessionManager.getBranch());
+			if (active) {
+				// The branch has no entry yet for a metric measured earlier in the same
+				// turn; count it so the live footer matches what a reload recomputes.
+				agg = aggregatesFromBranch(ctx.sessionManager.getBranch());
+				recordInFlight(agg, pendingMetrics);
+			}
 			updateFooter(ctx);
 			ctx.ui.notify(`Request timing ${active ? "on" : "off"}.`, "info");
 		},
@@ -325,7 +346,7 @@ export default function piTps(pi: ExtensionAPI) {
 	// leaving a blank spacer in the transcript.
 	pi.registerEntryRenderer(METRIC_ENTRY, (entry, _opts, theme) => {
 		if (!active) return undefined;
-		const line = metricLine(entry.data as Metric);
+		const line = entryMetricLine(entry.data);
 		return line === undefined ? undefined : new Text(theme.fg("dim", line));
 	});
 

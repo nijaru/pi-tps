@@ -27,6 +27,8 @@ Tool calls and incomplete responses are omitted.
 
 Timing state and measurements persist with the session and follow the active branch after `/reload` or `/tree` navigation. `/tps reset` clears the session averages and stays cleared across reloads and branch navigation. The last on/off value is also saved under the agent config directory (`~/.pi/agent/extensions/pi-tps.json` by default), so new sessions start with timing as it was last set.
 
+Turning timing off clears the footer right away. Rows already in the transcript disappear the next time the transcript is rebuilt (for example after `/reload` or `/tree` navigation).
+
 ## Install
 
 ```text

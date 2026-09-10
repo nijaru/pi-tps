@@ -9,6 +9,7 @@ import {
 	aggregatesFromBranch,
 	chooseRateBasis,
 	emptyAggregates,
+	entryMetricLine,
 	fmtSeconds,
 	fmtTps,
 	isUsableMetric,
@@ -17,6 +18,7 @@ import {
 	metricLine,
 	readGlobalState,
 	record,
+	recordInFlight,
 	RESET_ENTRY,
 	STATE_ENTRY,
 	summaryLine,
@@ -110,6 +112,27 @@ describe("record / aggregates", () => {
 		record(agg, metric({ outputTokens: 100, rateMs: 2000 }));
 		record(agg, metric({ outputTokens: 300, rateMs: 6000, ttftMs: 500 }));
 		expect(agg).toEqual({ totalTokens: 400, totalRateMs: 8000, ttftSumMs: 1500, ttftCount: 2 });
+	});
+});
+
+describe("recordInFlight", () => {
+	test("adds a metric measured this turn on top of the persisted averages", () => {
+		const agg = aggregatesFromBranch(
+			branch([METRIC_ENTRY, metric({ outputTokens: 100, rateMs: 2000, ttftMs: 1000 })]),
+		);
+		recordInFlight(agg, [metric({ outputTokens: 25, rateMs: 500, ttftMs: 250 })]);
+		expect(agg).toEqual({ totalTokens: 125, totalRateMs: 2500, ttftSumMs: 1250, ttftCount: 2 });
+	});
+	test("rebuilds the same average as a reload after /tps reset", () => {
+		const fresh = metric({ outputTokens: 40, rateMs: 2000, ttftMs: 500 });
+		const agg = emptyAggregates();
+		recordInFlight(agg, [fresh]);
+		expect(agg).toEqual(aggregatesFromBranch(branch([RESET_ENTRY, {}], [METRIC_ENTRY, fresh])));
+	});
+	test("skips unusable in-flight metrics", () => {
+		const agg = emptyAggregates();
+		recordInFlight(agg, [metric({ stopReason: "toolUse" }), metric({ ttftMs: undefined })]);
+		expect(agg).toEqual(emptyAggregates());
 	});
 });
 
@@ -255,6 +278,22 @@ describe("metricLine", () => {
 	});
 	test("returns undefined for unusable metrics", () => {
 		expect(metricLine(metric({ stopReason: "toolUse" }))).toBeUndefined();
+	});
+});
+
+describe("entryMetricLine", () => {
+	test("formats a usable persisted metric", () => {
+		expect(entryMetricLine(metric())).toBe("⏱ 1.00s · 27.2 tok/s");
+	});
+	test("returns undefined for malformed data instead of throwing", () => {
+		for (const data of [undefined, null, "⏱ 1.00s", 3, true, []]) {
+			expect(entryMetricLine(data)).toBeUndefined();
+		}
+	});
+	test("returns undefined for unusable or older metric data", () => {
+		expect(entryMetricLine({})).toBeUndefined();
+		expect(entryMetricLine(metric({ stopReason: "toolUse" }))).toBeUndefined();
+		expect(entryMetricLine({ ...metric(), version: 2 })).toBeUndefined();
 	});
 });
 
