@@ -7,7 +7,6 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
 	activeFromBranch,
 	aggregatesFromBranch,
-	ARMED_STATUS,
 	chooseRateBasis,
 	emptyAggregates,
 	fmtSeconds,
@@ -260,8 +259,8 @@ describe("metricLine", () => {
 });
 
 describe("summaryLine", () => {
-	test("shows the armed indicator before the first measurement", () => {
-		expect(summaryLine(emptyAggregates())).toBe(ARMED_STATUS);
+	test("shows nothing before the first measurement", () => {
+		expect(summaryLine(emptyAggregates())).toBeUndefined();
 	});
 	test("shows averages once measurements exist", () => {
 		expect(summaryLine({ totalTokens: 272, totalRateMs: 10_000, ttftSumMs: 8820, ttftCount: 1 })).toBe(

@@ -12,8 +12,8 @@
  *   so it survives reloads and is restored on the correct branch after /tree.
  *   The last-set value is also saved under the agent config directory
  *   (pi-tps.json) so new sessions start with it.
- * - While enabled with no measurements yet, the footer shows "⏱ on" so the
- *   armed state stays visible.
+ * - The footer only shows averages once the session has measurements; an
+ *   enabled session with nothing measured yet adds no status text.
  */
 
 import {
@@ -31,7 +31,6 @@ export const STATE_ENTRY = "tps-state";
 export const METRIC_ENTRY = "tps-metric";
 export const RESET_ENTRY = "tps-reset";
 export const STATUS_KEY = "tps";
-export const ARMED_STATUS = "⏱ on";
 // Last-set on/off value shared across sessions, mirroring pi-fast-mode.
 const GLOBAL_STATE_PATH = join(getAgentDir(), "extensions", "pi-tps.json");
 
@@ -122,9 +121,9 @@ export function metricLine(m: Metric): string | undefined {
 	return `⏱ ${fmtSeconds(m.ttftMs ?? 0)} · ${fmtTps(m.outputTokens, m.rateMs)} tok/s`;
 }
 
-/** Footer line for the session: averages, or the armed indicator before the first measurement. */
-export function summaryLine(agg: Aggregates): string {
-	if (agg.ttftCount === 0) return ARMED_STATUS;
+/** Footer line for the session: averages, or undefined before the first measurement. */
+export function summaryLine(agg: Aggregates): string | undefined {
+	if (agg.ttftCount === 0) return undefined;
 	return `⏱ ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s`;
 }
 
