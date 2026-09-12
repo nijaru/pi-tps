@@ -1,6 +1,6 @@
 {
-  "name": "pi-tps",
-  "version": "0.1.0",
+  "name": "@nijaru/pi-tps",
+  "version": "0.0.1",
   "type": "module",
   "description": "Per-request TTFT and tokens-per-second for pi, with session averages in the footer.",
   "keywords": [
@@ -13,6 +13,9 @@
     "throughput"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "author": "Nick Naru <nick@nijaru.com>",
   "repository": {
     "type": "git",

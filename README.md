@@ -32,7 +32,7 @@ Turning timing off clears the footer right away. Rows already in the transcript 
 ## Install
 
 ```text
-pi install git:github.com/nijaru/pi-tps
+pi install npm:@nijaru/pi-tps
 ```
 
 ## License
