@@ -231,7 +231,8 @@ export default function piTps(pi: ExtensionAPI) {
 	let agg = emptyAggregates();
 
 	function updateFooter(ctx: ExtensionContext): void {
-		ctx.ui.setStatus(STATUS_KEY, active ? summaryLine(agg) : undefined);
+		const line = active ? summaryLine(agg) : undefined;
+		ctx.ui.setStatus(STATUS_KEY, line ? `· ${line}` : undefined);
 	}
 
 	pi.on("before_provider_request", async () => {
