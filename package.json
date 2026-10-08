@@ -33,9 +33,9 @@
     "check": "bun test && oxlint extensions/ tests/ && tsc --noEmit"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.0.2",
-    "@earendil-works/pi-coding-agent": "1.0.2",
-    "@earendil-works/pi-tui": "1.0.2",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
     "@types/bun": "latest",
     "oxlint": "latest",
     "typescript": "^6.0.3"
