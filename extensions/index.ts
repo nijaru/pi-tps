@@ -68,13 +68,15 @@ export const emptyAggregates = (): Aggregates => ({
 	ttftCount: 0,
 });
 
-export function isUsableMetric(m: Metric): boolean {
+export function isUsableMetric(data: unknown): data is Metric {
+	if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
+	const m = data as Partial<Metric>;
 	return (
 		m.version === 3 &&
-		m.ttftMs !== undefined &&
-		m.ttftMs >= 0 &&
-		m.rateMs > 0 &&
-		m.outputTokens > 0 &&
+		typeof m.ttftMs === "number" && Number.isFinite(m.ttftMs) && m.ttftMs >= 0 &&
+		typeof m.rateMs === "number" && Number.isFinite(m.rateMs) && m.rateMs > 0 &&
+		typeof m.outputTokens === "number" && Number.isFinite(m.outputTokens) && m.outputTokens > 0 &&
+		(m.rateBasis === "stream" || m.rateBasis === "request") &&
 		(m.stopReason === "stop" || m.stopReason === "length")
 	);
 }
@@ -220,12 +222,8 @@ export function aggregatesFromBranch(entries: readonly SessionEntry[]): Aggregat
 }
 
 export default function piTps(pi: ExtensionAPI) {
-	// Row visibility gating. Seeded from the shared last-set value because pi
-	// rebuilds the transcript from session entries before emitting session_start
-	// on /reload, /resume, and /fork, where a hardcoded false would hide every
-	// persisted row. session_start then replaces it with the branch value.
+	// On/off controls recording and the footer, not saved transcript evidence.
 	let active = readGlobalState() ?? false;
-	let requestStartMs: number | undefined;
 	let pending: PendingTiming | undefined;
 	let pendingMetrics: Metric[] = [];
 	let agg = emptyAggregates();
@@ -235,30 +233,23 @@ export default function piTps(pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY, line ? `· ${line}` : undefined);
 	}
 
-	pi.on("before_provider_request", async () => {
-		if (active) requestStartMs = Date.now();
-	});
-
 	pi.on("message_start", async (event) => {
 		if (!active || event.message.role !== "assistant") return;
 		pending = {
-			requestStartMs: requestStartMs ?? Date.now(),
+			// Pi providers stamp the message at invocation, before HTTP dispatch.
+			// Unlike the global payload hook, this clock belongs to this response.
+			requestStartMs: event.message.timestamp,
 			firstDeltaMs: undefined,
 			sawThinkingDelta: false,
 			api: event.message.api,
 		};
-		requestStartMs = undefined;
 	});
 
 	pi.on("message_update", async (event) => {
-		if (!pending || pending.firstDeltaMs !== undefined) return;
+		if (!pending) return;
 		const type = event.assistantMessageEvent.type;
-		if (type === "thinking_delta") {
-			pending.firstDeltaMs = Date.now();
-			pending.sawThinkingDelta = true;
-		} else if (type === "text_delta") {
-			pending.firstDeltaMs = Date.now();
-		}
+		if (type === "thinking_delta") pending.sawThinkingDelta = true;
+		if (pending.firstDeltaMs === undefined && (type === "thinking_delta" || type === "text_delta")) pending.firstDeltaMs = Date.now();
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -341,12 +332,9 @@ export default function piTps(pi: ExtensionAPI) {
 		},
 	});
 
-	// One fixed line per message. The /tps toggle controls visibility for
-	// rows rendered after it changes and for the whole transcript after a
-	// reload or /tree rebuild. Returning undefined keeps hidden rows from
-	// leaving a blank spacer in the transcript.
+	// Saved measurements remain visible independently of current recording state.
+	// Pi constructs these rows before session_start restores the branch state.
 	pi.registerEntryRenderer(METRIC_ENTRY, (entry, _opts, theme) => {
-		if (!active) return undefined;
 		const line = entryMetricLine(entry.data);
 		return line === undefined ? undefined : new Text(theme.fg("dim", line));
 	});

@@ -10,12 +10,10 @@ import {
 	chooseRateBasis,
 	emptyAggregates,
 	entryMetricLine,
-	fmtSeconds,
 	fmtTps,
 	isUsableMetric,
 	METRIC_ENTRY,
 	metricFromTiming,
-	metricLine,
 	readGlobalState,
 	record,
 	recordInFlight,
@@ -59,6 +57,15 @@ const timing = (overrides: Partial<PendingTiming> = {}): PendingTiming => ({
 });
 
 describe("isUsableMetric", () => {
+	test("rejects malformed persisted numeric fields before aggregation", () => {
+		for (const field of ["ttftMs", "rateMs", "outputTokens"] as const) {
+			for (const value of [null, "100", NaN, Infinity]) {
+				const invalid = { ...metric(), [field]: value };
+				expect(entryMetricLine(invalid)).toBeUndefined();
+				expect(aggregatesFromBranch(branch([METRIC_ENTRY, invalid]))).toEqual(emptyAggregates());
+			}
+		}
+	});
 	test("accepts a completed visible response", () => {
 		expect(isUsableMetric(metric())).toBe(true);
 		expect(isUsableMetric(metric({ stopReason: "length" }))).toBe(true);
@@ -102,11 +109,6 @@ describe("chooseRateBasis", () => {
 });
 
 describe("record / aggregates", () => {
-	test("record skips unusable metrics", () => {
-		const agg = emptyAggregates();
-		record(agg, metric({ outputTokens: 0 }));
-		expect(agg).toEqual(emptyAggregates());
-	});
 	test("record accumulates tokens, rate time, and TTFT", () => {
 		const agg = emptyAggregates();
 		record(agg, metric({ outputTokens: 100, rateMs: 2000 }));
@@ -128,11 +130,6 @@ describe("recordInFlight", () => {
 		const agg = emptyAggregates();
 		recordInFlight(agg, [fresh]);
 		expect(agg).toEqual(aggregatesFromBranch(branch([RESET_ENTRY, {}], [METRIC_ENTRY, fresh])));
-	});
-	test("skips unusable in-flight metrics", () => {
-		const agg = emptyAggregates();
-		recordInFlight(agg, [metric({ stopReason: "toolUse" }), metric({ ttftMs: undefined })]);
-		expect(agg).toEqual(emptyAggregates());
 	});
 });
 
@@ -272,15 +269,6 @@ describe("metricFromTiming", () => {
 	});
 });
 
-describe("metricLine", () => {
-	test("formats a usable metric", () => {
-		expect(metricLine(metric())).toBe("⏱ 1.00s · 27.2 tok/s");
-	});
-	test("returns undefined for unusable metrics", () => {
-		expect(metricLine(metric({ stopReason: "toolUse" }))).toBeUndefined();
-	});
-});
-
 describe("entryMetricLine", () => {
 	test("formats a usable persisted metric", () => {
 		expect(entryMetricLine(metric())).toBe("⏱ 1.00s · 27.2 tok/s");
@@ -309,10 +297,6 @@ describe("summaryLine", () => {
 });
 
 describe("formatting", () => {
-	test("fmtSeconds renders two decimals", () => {
-		expect(fmtSeconds(8820)).toBe("8.82s");
-		expect(fmtSeconds(500)).toBe("0.50s");
-	});
 	test("fmtTps rounds fast streams to integers and keeps one decimal below 100", () => {
 		expect(fmtTps(272, 10_000)).toBe("27.2");
 		expect(fmtTps(2500, 10_000)).toBe("250");
