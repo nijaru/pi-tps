@@ -10,8 +10,8 @@ Pi loads the TypeScript entrypoint directly; there is no build step.
 ## Architecture
 
 - `extensions/index.ts` owns Pi lifecycle hooks, timing capture, the `/tps` command, and footer/row rendering.
-- Pure functions (`chooseRateBasis`, `isUsableMetric`, `aggregatesFromBranch`, `activeFromBranch`, `recordInFlight`, `entryMetricLine`, global state) are exported for tests and own all policy decisions.
-- Timing entries (`tps-metric`) persist as session entries so rows and averages survive reloads and follow the active branch after `/tree`. `tps-reset` markers keep `/tps reset` durable; they render nothing.
+- Pure functions (`chooseRateBasis`, `isUsableMetric`, `hasVisibleText`, `aggregatesFromBranch`, `activeFromBranch`, `recordInFlight`, `entryMetricLine`, global state) are exported for tests and own all policy decisions.
+- Timing entries (`tps-metric`) persist as session entries so rows and averages survive reloads and follow the active branch after `/tree`. `tps-reset` markers keep `/tps reset` durable; they render nothing. A row exists only for completed turns that emitted visible text, including text alongside tool calls.
 - Saved rows remain visible regardless of recording state: Pi builds the transcript before `session_start` restores branch state. On/off controls new measurements and the footer.
 - Use the assistant message timestamp for request timing; the global payload hook also fires for background cache warming and cannot correlate requests.
 - Throughput uses the emitted stream, or the full request window when the provider reports hidden reasoning tokens (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`).

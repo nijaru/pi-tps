@@ -11,6 +11,7 @@ import {
 	emptyAggregates,
 	entryMetricLine,
 	fmtTps,
+	hasVisibleText,
 	isUsableMetric,
 	METRIC_ENTRY,
 	metricFromTiming,
@@ -43,6 +44,7 @@ const assistantMessage = (overrides: Partial<AssistantMessage> = {}): AssistantM
 	({
 		role: "assistant",
 		api: "anthropic-messages",
+		content: [{ type: "text", text: "hello" }],
 		usage: { output: 100, reasoning: 0 },
 		stopReason: "stop",
 		...overrides,
@@ -66,14 +68,15 @@ describe("isUsableMetric", () => {
 			}
 		}
 	});
-	test("accepts a completed visible response", () => {
+	test("accepts completed stream endings, including tool-call turns", () => {
 		expect(isUsableMetric(metric())).toBe(true);
 		expect(isUsableMetric(metric({ stopReason: "length" }))).toBe(true);
+		expect(isUsableMetric(metric({ stopReason: "toolUse" }))).toBe(true);
 	});
-	test("rejects tool calls, failures, aborts, and empty streams", () => {
-		expect(isUsableMetric(metric({ stopReason: "toolUse" }))).toBe(false);
+	test("rejects failures, aborts, and unknown endings", () => {
 		expect(isUsableMetric(metric({ stopReason: "aborted" }))).toBe(false);
 		expect(isUsableMetric(metric({ stopReason: "error" }))).toBe(false);
+		expect(isUsableMetric(metric({ stopReason: "pending" }))).toBe(false);
 		expect(isUsableMetric(metric({ stopReason: "unknown" }))).toBe(false);
 	});
 	test("rejects missing TTFT, non-positive rates, and empty token counts", () => {
@@ -84,6 +87,20 @@ describe("isUsableMetric", () => {
 	test("rejects other metric versions", () => {
 		// Metrics from older extension versions stored in sessions must not count.
 		expect(isUsableMetric(metric({ version: 2 } as Partial<Metric> & { version: number } as Metric))).toBe(false);
+	});
+});
+
+describe("hasVisibleText", () => {
+	const withContent = (content: unknown[]) => assistantMessage({ content } as Partial<AssistantMessage>);
+	test("true for prose, including a turn that also calls tools", () => {
+		expect(hasVisibleText(assistantMessage())).toBe(true);
+		expect(hasVisibleText(withContent([{ type: "text", text: "hi" }, { type: "toolCall", toolName: "bash" }]))).toBe(true);
+	});
+	test("false for tool-only, thinking-only, blank, and empty turns", () => {
+		expect(hasVisibleText(withContent([{ type: "toolCall", toolName: "bash" }]))).toBe(false);
+		expect(hasVisibleText(withContent([{ type: "thinking", thinking: "hmm" }]))).toBe(false);
+		expect(hasVisibleText(withContent([{ type: "text", text: "  \n" }]))).toBe(false);
+		expect(hasVisibleText(withContent([]))).toBe(false);
 	});
 });
 
@@ -167,7 +184,7 @@ describe("aggregatesFromBranch", () => {
 	test("ignores unusable metrics and other entry types", () => {
 		const agg = aggregatesFromBranch(
 			branch(
-				[METRIC_ENTRY, metric({ stopReason: "toolUse" })],
+				[METRIC_ENTRY, metric({ stopReason: "aborted" })],
 				["other", metric()],
 			),
 		);
@@ -262,6 +279,18 @@ describe("metricFromTiming", () => {
 		expect(m.rateMs).toBe(5000);
 		expect(m.rateBasis).toBe("request");
 	});
+	test("keeps the tool-call ending for a turn that also emitted text", () => {
+		const m = metricFromTiming(
+			timing(),
+			assistantMessage({
+				stopReason: "toolUse",
+				content: [{ type: "text", text: "hi" }, { type: "toolCall", toolName: "bash" }] as AssistantMessage["content"],
+			}),
+			6000,
+		);
+		expect(m.stopReason).toBe("toolUse");
+		expect(isUsableMetric(m)).toBe(true);
+	});
 	test("leaves TTFT undefined and rate zero when no delta arrived", () => {
 		const m = metricFromTiming(timing({ firstDeltaMs: undefined }), assistantMessage(), 6000);
 		expect(m.ttftMs).toBeUndefined();
@@ -280,7 +309,7 @@ describe("entryMetricLine", () => {
 	});
 	test("returns undefined for unusable or older metric data", () => {
 		expect(entryMetricLine({})).toBeUndefined();
-		expect(entryMetricLine(metric({ stopReason: "toolUse" }))).toBeUndefined();
+		expect(entryMetricLine(metric({ stopReason: "aborted" }))).toBeUndefined();
 		expect(entryMetricLine({ ...metric(), version: 2 })).toBeUndefined();
 	});
 });

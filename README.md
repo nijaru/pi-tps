@@ -2,7 +2,7 @@
 
 Per-request latency and throughput timing for [pi](https://github.com/earendil-works/pi).
 
-When enabled, pi-tps shows one timing line below each completed assistant response in the transcript. The footer shows the averages for the current session using the same format:
+When enabled, pi-tps shows one timing line below each assistant response that emits visible text — including responses that also call tools. The footer shows the averages for the current session using the same format:
 
 ```text
 ⏱ 8.82s · 27.2 tok/s
@@ -13,7 +13,7 @@ When enabled, pi-tps shows one timing line below each completed assistant respon
 - **Latency** — time from the provider invocation (the assistant message timestamp) to the first thinking or text token. This includes provider-side request preparation, but not Pi’s earlier credential lookup.
 - **Throughput** — reported output tokens per second after the first token, or across the full request when reasoning is hidden.
 
-Tool calls and incomplete responses are omitted.
+Responses that only make tool calls, and incomplete responses (failed or aborted), are omitted.
 
 ## Usage
 

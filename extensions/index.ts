@@ -6,8 +6,9 @@
  *   delta event.
  * - Measures throughput over the emitted stream, or over the full request when
  *   the provider hides reasoning tokens from the stream.
- * - Per-message timing renders as one line directly below each completed
- *   assistant response.
+ * - Per-message timing renders as one line directly below each assistant
+ *   response that emitted visible text, including responses that also call
+ *   tools. Tool-only, failed, and aborted turns are not timed.
  * - Toggle with /tps [on|off|status|reset]. State persists in the session,
  *   so it survives reloads and is restored on the correct branch after /tree.
  *   The last-set value is also saved under the agent config directory
@@ -33,6 +34,9 @@ export const RESET_ENTRY = "tps-reset";
 export const STATUS_KEY = "tps";
 // Last-set on/off value shared across sessions, mirroring pi-fast-mode.
 const GLOBAL_STATE_PATH = join(getAgentDir(), "extensions", "pi-tps.json");
+
+/** Turn endings that completed the stream and are worth timing. */
+const COMPLETED_STOP_REASONS = new Set(["stop", "length", "toolUse"]);
 
 /** APIs that can report hidden reasoning tokens even while emitting reasoning summaries. */
 const REQUEST_BASIS_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
@@ -77,8 +81,13 @@ export function isUsableMetric(data: unknown): data is Metric {
 		typeof m.rateMs === "number" && Number.isFinite(m.rateMs) && m.rateMs > 0 &&
 		typeof m.outputTokens === "number" && Number.isFinite(m.outputTokens) && m.outputTokens > 0 &&
 		(m.rateBasis === "stream" || m.rateBasis === "request") &&
-		(m.stopReason === "stop" || m.stopReason === "length")
+		(typeof m.stopReason === "string" && COMPLETED_STOP_REASONS.has(m.stopReason))
 	);
+}
+
+/** Whether the finished message streamed prose the user can see. */
+export function hasVisibleText(message: AssistantMessage): boolean {
+	return message.content.some((part) => part.type === "text" && part.text.trim().length > 0);
 }
 
 export function chooseRateBasis(
@@ -259,10 +268,11 @@ export default function piTps(pi: ExtensionAPI) {
 		if (!started) return;
 
 		const metric = metricFromTiming(started, event.message, Date.now());
-		// Only completed visible responses have meaningful latency/throughput.
-		// Tool-call, failed, aborted, and empty streams must not create rows or
-		// contaminate the session averages.
-		if (!isUsableMetric(metric)) return;
+		// Only completed responses with visible prose have meaningful
+		// latency/throughput. Tool-only, failed, aborted, and empty streams must
+		// not create rows or contaminate the session averages. Text that
+		// accompanies tool calls is still user-visible, so those turns are timed.
+		if (!isUsableMetric(metric) || !hasVisibleText(event.message)) return;
 
 		record(agg, metric);
 		pendingMetrics.push(metric);

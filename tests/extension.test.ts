@@ -33,7 +33,7 @@ test("message-owned timing ignores warming requests and observes later thinking"
 	await f.emit("before_provider_request", {});
 	setSystemTime(1400);
 	await f.emit("before_provider_request", {}); // background cache warmer
-	const message = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "stop", usage: { output: 100, reasoning: 20 } };
+	const message = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "stop", usage: { output: 100, reasoning: 20 }, content: [{ type: "text", text: "answer" }] };
 	await f.emit("message_start", { message });
 	setSystemTime(1500);
 	await f.emit("message_update", { assistantMessageEvent: { type: "text_delta" } });
@@ -43,4 +43,25 @@ test("message-owned timing ignores warming requests and observes later thinking"
 	await f.emit("message_end", { message });
 	await f.emit("turn_end", { message });
 	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 500, rateMs: 500, outputTokens: 100, stopReason: "stop", rateBasis: "stream" } }]);
+});
+
+test("rows follow visible text, not turn endings", async () => {
+	const f = fixture(true);
+	await f.emit("session_start", {});
+	setSystemTime(1000);
+	const toolTurn = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "toolUse", usage: { output: 100, reasoning: 0 }, content: [{ type: "text", text: "running it" }, { type: "toolCall", toolName: "bash" }] };
+	await f.emit("message_start", { message: toolTurn });
+	setSystemTime(1200);
+	await f.emit("message_update", { assistantMessageEvent: { type: "text_delta" } });
+	setSystemTime(1500);
+	await f.emit("message_end", { message: toolTurn });
+	await f.emit("turn_end", { message: toolTurn });
+	const silentTurn = { role: "assistant", timestamp: 2000, api: "anthropic-messages", stopReason: "toolUse", usage: { output: 50, reasoning: 0 }, content: [{ type: "toolCall", toolName: "bash" }] };
+	await f.emit("message_start", { message: silentTurn });
+	setSystemTime(2100);
+	await f.emit("message_update", { assistantMessageEvent: { type: "thinking_delta" } });
+	setSystemTime(2300);
+	await f.emit("message_end", { message: silentTurn });
+	await f.emit("turn_end", { message: silentTurn });
+	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 200, rateMs: 300, outputTokens: 100, stopReason: "toolUse", rateBasis: "stream" } }]);
 });
