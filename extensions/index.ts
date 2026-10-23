@@ -72,7 +72,7 @@ export const emptyAggregates = (): Aggregates => ({
 	ttftCount: 0,
 });
 
-export function isUsableMetric(data: unknown): data is Metric {
+export function isUsableMetric(data: unknown): data is Metric & { ttftMs: number } {
 	if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
 	const m = data as Partial<Metric>;
 	return (
@@ -108,11 +108,11 @@ export function chooseRateBasis(
 	return sawThinkingDelta ? "stream" : "request";
 }
 
-export function record(agg: Aggregates, m: Metric): void {
+function record(agg: Aggregates, m: Metric): void {
 	if (!isUsableMetric(m)) return;
 	agg.totalTokens += m.outputTokens;
 	agg.totalRateMs += m.rateMs;
-	agg.ttftSumMs += m.ttftMs ?? 0;
+	agg.ttftSumMs += m.ttftMs;
 	agg.ttftCount += 1;
 }
 
@@ -131,17 +131,11 @@ export function recordInFlight(agg: Aggregates, inFlight: readonly Metric[]): vo
 	for (const metric of inFlight) record(agg, metric);
 }
 
-/** One line for a finished request, or undefined when it is not worth showing. */
-export function metricLine(m: Metric): string | undefined {
-	if (!isUsableMetric(m)) return undefined;
-	return `⏱ ${fmtSeconds(m.ttftMs ?? 0)} · ${fmtTps(m.outputTokens, m.rateMs)} tok/s`;
-}
-
 /** One line for a persisted metric entry, or undefined when there is nothing to show. */
 export function entryMetricLine(data: unknown): string | undefined {
-	// Session files are user-editable, so never hand a non-object to metricLine.
-	if (typeof data !== "object" || data === null) return undefined;
-	return metricLine(data as Metric);
+	// Session files are user-editable, so validate unknown data before formatting.
+	if (!isUsableMetric(data)) return undefined;
+	return `⏱ ${fmtSeconds(data.ttftMs)} · ${fmtTps(data.outputTokens, data.rateMs)} tok/s`;
 }
 
 /** Footer line for the session: averages, or undefined before the first measurement. */
