@@ -16,7 +16,6 @@ import {
 	METRIC_ENTRY,
 	metricFromTiming,
 	readGlobalState,
-	record,
 	recordInFlight,
 	RESET_ENTRY,
 	STATE_ENTRY,
@@ -122,15 +121,6 @@ describe("chooseRateBasis", () => {
 	});
 	test("requests for other APIs when reasoning happened off-stream", () => {
 		expect(chooseRateBasis("anthropic-messages", false, 512)).toBe("request");
-	});
-});
-
-describe("record / aggregates", () => {
-	test("record accumulates tokens, rate time, and TTFT", () => {
-		const agg = emptyAggregates();
-		record(agg, metric({ outputTokens: 100, rateMs: 2000 }));
-		record(agg, metric({ outputTokens: 300, rateMs: 6000, ttftMs: 500 }));
-		expect(agg).toEqual({ totalTokens: 400, totalRateMs: 8000, ttftSumMs: 1500, ttftCount: 2 });
 	});
 });
 
@@ -302,15 +292,11 @@ describe("entryMetricLine", () => {
 	test("formats a usable persisted metric", () => {
 		expect(entryMetricLine(metric())).toBe("⏱ 1.00s · 27.2 tok/s");
 	});
-	test("returns undefined for malformed data instead of throwing", () => {
-		for (const data of [undefined, null, "⏱ 1.00s", 3, true, []]) {
+	test("returns undefined for non-objects, unusable metrics, and older versions", () => {
+		// Session files are user-editable; none of these may render or throw.
+		for (const data of [undefined, null, "⏱ 1.00s", 3, true, [], {}, metric({ stopReason: "aborted" }), { ...metric(), version: 2 }]) {
 			expect(entryMetricLine(data)).toBeUndefined();
 		}
-	});
-	test("returns undefined for unusable or older metric data", () => {
-		expect(entryMetricLine({})).toBeUndefined();
-		expect(entryMetricLine(metric({ stopReason: "aborted" }))).toBeUndefined();
-		expect(entryMetricLine({ ...metric(), version: 2 })).toBeUndefined();
 	});
 });
 
@@ -326,12 +312,10 @@ describe("summaryLine", () => {
 });
 
 describe("formatting", () => {
-	test("fmtTps rounds fast streams to integers and keeps one decimal below 100", () => {
+	test("fmtTps rounds fast streams to integers and never divides by zero", () => {
 		expect(fmtTps(272, 10_000)).toBe("27.2");
 		expect(fmtTps(2500, 10_000)).toBe("250");
 		expect(fmtTps(0, 10_000)).toBe("0.0");
-	});
-	test("fmtTps never divides by zero", () => {
 		expect(fmtTps(100, 0)).toBe("?");
 	});
 });

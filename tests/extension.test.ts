@@ -26,13 +26,29 @@ test("saved timing rows remain visible when recording is disabled", async () => 
 	expect(row?.render(80).join("\n")).toContain("0.50s · 100 tok/s");
 });
 
-test("message-owned timing ignores warming requests and observes later thinking", async () => {
+test("request timing starts at the assistant message timestamp, not background request activity", async () => {
+	const f = fixture(true);
+	await f.emit("session_start", {});
+	setSystemTime(800);
+	await f.emit("before_provider_request", {}); // background cache warmer
+	const message = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "stop", usage: { output: 100, reasoning: 0 }, content: [{ type: "text", text: "answer" }] };
+	await f.emit("message_start", { message });
+	setSystemTime(1200);
+	await f.emit("before_provider_request", {}); // another warming request
+	setSystemTime(1500);
+	await f.emit("message_update", { assistantMessageEvent: { type: "text_delta" } });
+	setSystemTime(2000);
+	await f.emit("message_end", { message });
+	await f.emit("turn_end", { message });
+	// ttft is measured from the message timestamp: any warming-request clock
+	// (800 or 1200) would produce a different value.
+	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 500, rateMs: 500, outputTokens: 100, stopReason: "stop", rateBasis: "stream" } }]);
+});
+
+test("a thinking delta after visible text still counts reasoning as streamed", async () => {
 	const f = fixture(true);
 	await f.emit("session_start", {});
 	setSystemTime(1000);
-	await f.emit("before_provider_request", {});
-	setSystemTime(1400);
-	await f.emit("before_provider_request", {}); // background cache warmer
 	const message = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "stop", usage: { output: 100, reasoning: 20 }, content: [{ type: "text", text: "answer" }] };
 	await f.emit("message_start", { message });
 	setSystemTime(1500);
@@ -42,6 +58,8 @@ test("message-owned timing ignores warming requests and observes later thinking"
 	setSystemTime(2000);
 	await f.emit("message_end", { message });
 	await f.emit("turn_end", { message });
+	// Stream basis keeps rateMs at the emitted window (500); ignoring the late
+	// thinking delta would misread hidden reasoning and use the full 1000ms request.
 	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 500, rateMs: 500, outputTokens: 100, stopReason: "stop", rateBasis: "stream" } }]);
 });
 
