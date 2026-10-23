@@ -133,7 +133,7 @@ describe("recordInFlight", () => {
 			branch([METRIC_ENTRY, metric({ outputTokens: 100, rateMs: 2000, ttftMs: 1000 })]),
 		);
 		recordInFlight(agg, [metric({ outputTokens: 25, rateMs: 500, ttftMs: 250 })]);
-		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 125, totalRateMs: 2500, rateBasis: "stream", ttftSumMs: 1250, ttftCount: 2 });
+		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 125, totalRateMs: 2500, ttftSumMs: 1250, ttftCount: 2 });
 	});
 	test("rebuilds the same average as a reload after /tps reset", () => {
 		const fresh = metric({ outputTokens: 40, rateMs: 2000, ttftMs: 500, firstTextMs: 1500, rateBasis: "request" });
@@ -172,7 +172,7 @@ describe("aggregatesFromBranch", () => {
 				[METRIC_ENTRY, metric({ outputTokens: 50, rateMs: 1000 })],
 			),
 		);
-		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 150, totalRateMs: 3000, rateBasis: "stream", ttftSumMs: 2000, ttftCount: 2 });
+		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 150, totalRateMs: 3000, ttftSumMs: 2000, ttftCount: 2 });
 	});
 	test("ignores unusable metrics and other entry types", () => {
 		const agg = aggregatesFromBranch(
@@ -192,7 +192,7 @@ describe("aggregatesFromBranch", () => {
 				[METRIC_ENTRY, metric({ outputTokens: 25, rateMs: 500, ttftMs: 250, firstTextMs: 400, rateBasis: "request" })],
 			),
 		);
-		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 25, totalRateMs: 500, rateBasis: "request", textSumMs: 400, textCount: 1 });
+		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 25, totalRateMs: 500, textSumMs: 400, textCount: 1 });
 	});
 	test("a reset marker with null data still clears", () => {
 		const agg = aggregatesFromBranch(branch([METRIC_ENTRY, metric()], [RESET_ENTRY, null]));
@@ -273,7 +273,7 @@ describe("metricFromTiming", () => {
 		expect(m.ttftMs).toBe(500);
 		expect(m).toHaveProperty("firstTextMs", 500);
 		expect(m.outputTokens).toBe(100); // reasoning is already included
-		expect(entryMetricLine(m)).toBe("⏱ text 0.50s · 20.0 tok/s (full request)");
+		expect(entryMetricLine(m)).toBe("⏱ 0.50s · 20.0 tok/s");
 		expect(m.rateMs).toBe(5000);
 		expect(m.rateBasis).toBe("request");
 	});
@@ -297,9 +297,9 @@ describe("metricFromTiming", () => {
 });
 
 describe("entryMetricLine", () => {
-	test("keeps old saved latency labeled as first token, not visible text", () => {
+	test("preserves the original latency value in old saved rows", () => {
 		const saved = JSON.parse(JSON.stringify(metric()));
-		expect(entryMetricLine(saved)).toBe("⏱ first token 1.00s · 27.2 tok/s (stream)");
+		expect(entryMetricLine(saved)).toBe("⏱ 1.00s · 27.2 tok/s");
 	});
 	test("returns undefined for non-objects, unusable metrics, and older versions", () => {
 		// Session files are user-editable; none of these may render or throw.
@@ -315,17 +315,17 @@ describe("summaryLine", () => {
 	});
 	test("shows averages once measurements exist", () => {
 		expect(summaryLine(aggregatesFromBranch(branch([METRIC_ENTRY, metric({ ttftMs: 8820 })])))).toBe(
-			"⏱ first token 8.82s · 27.2 tok/s (stream)",
+			"⏱ 8.82s · 27.2 tok/s",
 		);
 	});
-	test("keeps old and new latency averages separate and labels mixed rate windows", () => {
+	test("prefers visible-text latency without blending legacy timing into the footer", () => {
 		const saved = metric({ outputTokens: 100, rateMs: 1000, ttftMs: 500 });
 		const fresh = metric({ outputTokens: 100, rateMs: 3000, ttftMs: 1000, firstTextMs: 2000, rateBasis: "request" });
 		const later = { ...fresh, firstTextMs: 4000, rateMs: 5000 };
 		const agg = aggregatesFromBranch(branch([METRIC_ENTRY, saved]));
 		recordInFlight(agg, [fresh, later]);
 		expect(agg).toEqual(aggregatesFromBranch(branch([METRIC_ENTRY, saved], [METRIC_ENTRY, fresh], [METRIC_ENTRY, later])));
-		expect(summaryLine(agg)).toBe("⏱ text 3.00s · first token 0.50s · 33.3 tok/s (mixed)");
+		expect(summaryLine(agg)).toBe("⏱ 3.00s · 33.3 tok/s");
 	});
 });
 

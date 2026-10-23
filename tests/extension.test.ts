@@ -24,7 +24,7 @@ test("saved timing rows remain visible when recording is disabled", async () => 
 	const f = fixture(false);
 	await f.emit("session_start", {});
 	const row = f.row({ version: 3, ttftMs: 500, rateMs: 1000, outputTokens: 100, stopReason: "stop", rateBasis: "stream" });
-	expect(row?.render(80).join("\n")).toContain("first token 0.50s · 100 tok/s (stream)");
+	expect(row?.render(80).join("\n")).toContain("0.50s · 100 tok/s");
 	expect(f.statuses.at(-1)).toBeUndefined();
 });
 
@@ -45,7 +45,7 @@ test("hidden Responses reasoning uses visible-text latency and the full request 
 	// Both latencies start at the message timestamp, not a warming request.
 	// Reasoning is a subset of output; no thinking delta is needed to count it.
 	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 500, firstTextMs: 500, rateMs: 1000, outputTokens: 100, stopReason: "stop", rateBasis: "request" } }]);
-	expect(f.statuses.at(-1)).toBe("· ⏱ text 0.50s · 100 tok/s (full request)");
+	expect(f.statuses.at(-1)).toBe("· ⏱ 0.50s · 100 tok/s");
 });
 
 test("a thinking delta after visible text still counts reasoning as streamed", async () => {
@@ -80,8 +80,8 @@ test("thinking and blank text do not end the wait for visible text", async () =>
 	await f.emit("turn_end", { message });
 	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 200, firstTextMs: 800, rateMs: 800, outputTokens: 100, stopReason: "stop", rateBasis: "stream" } }]);
 	const saved = JSON.parse(JSON.stringify(f.entries[0]!.data));
-	expect(f.row(saved)?.render(100).join("\n")).toContain("text 0.80s · 125 tok/s (stream)");
-	expect(f.statuses.at(-1)).toBe("· ⏱ text 0.80s · 125 tok/s (stream)");
+	expect(f.row(saved)?.render(100).join("\n")).toContain("0.80s · 125 tok/s");
+	expect(f.statuses.at(-1)).toBe("· ⏱ 0.80s · 125 tok/s");
 });
 
 test("rows follow visible text, not turn endings", async () => {

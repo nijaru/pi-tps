@@ -56,7 +56,6 @@ export interface Metric {
 export interface Aggregates {
 	totalTokens: number;
 	totalRateMs: number;
-	rateBasis: Metric["rateBasis"] | "mixed" | undefined;
 	textSumMs: number;
 	textCount: number;
 	/** Legacy latency only; do not average first-token and first-text measurements together. */
@@ -76,7 +75,6 @@ export interface PendingTiming {
 export const emptyAggregates = (): Aggregates => ({
 	totalTokens: 0,
 	totalRateMs: 0,
-	rateBasis: undefined,
 	textSumMs: 0,
 	textCount: 0,
 	ttftSumMs: 0,
@@ -126,7 +124,6 @@ function record(agg: Aggregates, m: Metric): void {
 	if (!isUsableMetric(m)) return;
 	agg.totalTokens += m.outputTokens;
 	agg.totalRateMs += m.rateMs;
-	agg.rateBasis = agg.rateBasis === undefined || agg.rateBasis === m.rateBasis ? m.rateBasis : "mixed";
 	if (m.firstTextMs !== undefined) {
 		agg.textSumMs += m.firstTextMs;
 		agg.textCount += 1;
@@ -151,27 +148,19 @@ export function recordInFlight(agg: Aggregates, inFlight: readonly Metric[]): vo
 	for (const metric of inFlight) record(agg, metric);
 }
 
-function rateBasisLabel(basis: NonNullable<Aggregates["rateBasis"]>): string {
-	return basis === "request" ? "full request" : basis;
-}
-
 /** One line for a persisted metric entry, or undefined when there is nothing to show. */
 export function entryMetricLine(data: unknown): string | undefined {
 	// Session files are user-editable, so validate unknown data before formatting.
 	if (!isUsableMetric(data)) return undefined;
-	const latency = data.firstTextMs === undefined
-		? `first token ${fmtSeconds(data.ttftMs)}`
-		: `text ${fmtSeconds(data.firstTextMs)}`;
-	return `⏱ ${latency} · ${fmtTps(data.outputTokens, data.rateMs)} tok/s (${rateBasisLabel(data.rateBasis)})`;
+	return `⏱ ${fmtSeconds(data.firstTextMs ?? data.ttftMs)} · ${fmtTps(data.outputTokens, data.rateMs)} tok/s`;
 }
 
 /** Footer line for the session: averages, or undefined before the first measurement. */
 export function summaryLine(agg: Aggregates): string | undefined {
-	if (agg.rateBasis === undefined) return undefined;
-	const latencies: string[] = [];
-	if (agg.textCount > 0) latencies.push(`text ${fmtSeconds(agg.textSumMs / agg.textCount)}`);
-	if (agg.ttftCount > 0) latencies.push(`first token ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)}`);
-	return `⏱ ${latencies.join(" · ")} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s (${rateBasisLabel(agg.rateBasis)})`;
+	if (agg.textCount === 0 && agg.ttftCount === 0) return undefined;
+	// Prefer visible-text timing without blending it with legacy first-token data.
+	const latency = agg.textCount > 0 ? agg.textSumMs / agg.textCount : agg.ttftSumMs / agg.ttftCount;
+	return `⏱ ${fmtSeconds(latency)} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s`;
 }
 
 /** Turn captured timing plus the finished message into a persistable metric. */
