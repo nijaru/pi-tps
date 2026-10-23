@@ -52,6 +52,7 @@ const assistantMessage = (overrides: Partial<AssistantMessage> = {}): AssistantM
 const timing = (overrides: Partial<PendingTiming> = {}): PendingTiming => ({
 	requestStartMs: 1000,
 	firstDeltaMs: 1500,
+	firstTextMs: 1500,
 	sawThinkingDelta: false,
 	api: "anthropic-messages",
 	...overrides,
@@ -59,7 +60,7 @@ const timing = (overrides: Partial<PendingTiming> = {}): PendingTiming => ({
 
 describe("isUsableMetric", () => {
 	test("rejects malformed persisted numeric fields before aggregation", () => {
-		for (const field of ["ttftMs", "rateMs", "outputTokens"] as const) {
+		for (const field of ["ttftMs", "firstTextMs", "rateMs", "outputTokens"] as const) {
 			for (const value of [null, "100", NaN, Infinity]) {
 				const invalid = { ...metric(), [field]: value };
 				expect(entryMetricLine(invalid)).toBeUndefined();
@@ -69,6 +70,7 @@ describe("isUsableMetric", () => {
 	});
 	test("accepts completed stream endings, including tool-call turns", () => {
 		expect(isUsableMetric(metric())).toBe(true);
+		expect(isUsableMetric(metric({ firstTextMs: 1500 }))).toBe(true);
 		expect(isUsableMetric(metric({ stopReason: "length" }))).toBe(true);
 		expect(isUsableMetric(metric({ stopReason: "toolUse" }))).toBe(true);
 	});
@@ -80,6 +82,7 @@ describe("isUsableMetric", () => {
 	});
 	test("rejects missing TTFT, non-positive rates, and empty token counts", () => {
 		expect(isUsableMetric(metric({ ttftMs: undefined }))).toBe(false);
+		expect(isUsableMetric(metric({ firstTextMs: 900 }))).toBe(false);
 		expect(isUsableMetric(metric({ rateMs: 0 }))).toBe(false);
 		expect(isUsableMetric(metric({ outputTokens: 0 }))).toBe(false);
 	});
@@ -130,10 +133,10 @@ describe("recordInFlight", () => {
 			branch([METRIC_ENTRY, metric({ outputTokens: 100, rateMs: 2000, ttftMs: 1000 })]),
 		);
 		recordInFlight(agg, [metric({ outputTokens: 25, rateMs: 500, ttftMs: 250 })]);
-		expect(agg).toEqual({ totalTokens: 125, totalRateMs: 2500, ttftSumMs: 1250, ttftCount: 2 });
+		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 125, totalRateMs: 2500, rateBasis: "stream", ttftSumMs: 1250, ttftCount: 2 });
 	});
 	test("rebuilds the same average as a reload after /tps reset", () => {
-		const fresh = metric({ outputTokens: 40, rateMs: 2000, ttftMs: 500 });
+		const fresh = metric({ outputTokens: 40, rateMs: 2000, ttftMs: 500, firstTextMs: 1500, rateBasis: "request" });
 		const agg = emptyAggregates();
 		recordInFlight(agg, [fresh]);
 		expect(agg).toEqual(aggregatesFromBranch(branch([RESET_ENTRY, {}], [METRIC_ENTRY, fresh])));
@@ -169,7 +172,7 @@ describe("aggregatesFromBranch", () => {
 				[METRIC_ENTRY, metric({ outputTokens: 50, rateMs: 1000 })],
 			),
 		);
-		expect(agg).toEqual({ totalTokens: 150, totalRateMs: 3000, ttftSumMs: 2000, ttftCount: 2 });
+		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 150, totalRateMs: 3000, rateBasis: "stream", ttftSumMs: 2000, ttftCount: 2 });
 	});
 	test("ignores unusable metrics and other entry types", () => {
 		const agg = aggregatesFromBranch(
@@ -184,11 +187,12 @@ describe("aggregatesFromBranch", () => {
 		const agg = aggregatesFromBranch(
 			branch(
 				[METRIC_ENTRY, metric({ outputTokens: 100, rateMs: 2000 })],
+				[METRIC_ENTRY, metric({ firstTextMs: 1500 })],
 				[RESET_ENTRY, {}],
-				[METRIC_ENTRY, metric({ outputTokens: 25, rateMs: 500, ttftMs: 250 })],
+				[METRIC_ENTRY, metric({ outputTokens: 25, rateMs: 500, ttftMs: 250, firstTextMs: 400, rateBasis: "request" })],
 			),
 		);
-		expect(agg).toEqual({ totalTokens: 25, totalRateMs: 500, ttftSumMs: 250, ttftCount: 1 });
+		expect(agg).toEqual({ ...emptyAggregates(), totalTokens: 25, totalRateMs: 500, rateBasis: "request", textSumMs: 400, textCount: 1 });
 	});
 	test("a reset marker with null data still clears", () => {
 		const agg = aggregatesFromBranch(branch([METRIC_ENTRY, metric()], [RESET_ENTRY, null]));
@@ -253,6 +257,7 @@ describe("metricFromTiming", () => {
 		expect(metricFromTiming(timing(), assistantMessage(), 6000)).toEqual({
 			version: 3,
 			ttftMs: 500,
+			firstTextMs: 500,
 			rateMs: 4500,
 			outputTokens: 100,
 			stopReason: "stop",
@@ -266,6 +271,9 @@ describe("metricFromTiming", () => {
 			6000,
 		);
 		expect(m.ttftMs).toBe(500);
+		expect(m).toHaveProperty("firstTextMs", 500);
+		expect(m.outputTokens).toBe(100); // reasoning is already included
+		expect(entryMetricLine(m)).toBe("⏱ text 0.50s · 20.0 tok/s (full request)");
 		expect(m.rateMs).toBe(5000);
 		expect(m.rateBasis).toBe("request");
 	});
@@ -282,15 +290,16 @@ describe("metricFromTiming", () => {
 		expect(isUsableMetric(m)).toBe(true);
 	});
 	test("leaves TTFT undefined and rate zero when no delta arrived", () => {
-		const m = metricFromTiming(timing({ firstDeltaMs: undefined }), assistantMessage(), 6000);
+		const m = metricFromTiming(timing({ firstDeltaMs: undefined, firstTextMs: undefined }), assistantMessage(), 6000);
 		expect(m.ttftMs).toBeUndefined();
 		expect(m.rateMs).toBe(0);
 	});
 });
 
 describe("entryMetricLine", () => {
-	test("formats a usable persisted metric", () => {
-		expect(entryMetricLine(metric())).toBe("⏱ 1.00s · 27.2 tok/s");
+	test("keeps old saved latency labeled as first token, not visible text", () => {
+		const saved = JSON.parse(JSON.stringify(metric()));
+		expect(entryMetricLine(saved)).toBe("⏱ first token 1.00s · 27.2 tok/s (stream)");
 	});
 	test("returns undefined for non-objects, unusable metrics, and older versions", () => {
 		// Session files are user-editable; none of these may render or throw.
@@ -305,9 +314,18 @@ describe("summaryLine", () => {
 		expect(summaryLine(emptyAggregates())).toBeUndefined();
 	});
 	test("shows averages once measurements exist", () => {
-		expect(summaryLine({ totalTokens: 272, totalRateMs: 10_000, ttftSumMs: 8820, ttftCount: 1 })).toBe(
-			"⏱ 8.82s · 27.2 tok/s",
+		expect(summaryLine(aggregatesFromBranch(branch([METRIC_ENTRY, metric({ ttftMs: 8820 })])))).toBe(
+			"⏱ first token 8.82s · 27.2 tok/s (stream)",
 		);
+	});
+	test("keeps old and new latency averages separate and labels mixed rate windows", () => {
+		const saved = metric({ outputTokens: 100, rateMs: 1000, ttftMs: 500 });
+		const fresh = metric({ outputTokens: 100, rateMs: 3000, ttftMs: 1000, firstTextMs: 2000, rateBasis: "request" });
+		const later = { ...fresh, firstTextMs: 4000, rateMs: 5000 };
+		const agg = aggregatesFromBranch(branch([METRIC_ENTRY, saved]));
+		recordInFlight(agg, [fresh, later]);
+		expect(agg).toEqual(aggregatesFromBranch(branch([METRIC_ENTRY, saved], [METRIC_ENTRY, fresh], [METRIC_ENTRY, later])));
+		expect(summaryLine(agg)).toBe("⏱ text 3.00s · first token 0.50s · 33.3 tok/s (mixed)");
 	});
 });
 

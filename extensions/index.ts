@@ -1,9 +1,9 @@
 /**
- * pi-tps: per-request latency (TTFT) and throughput (tokens/sec) for
+ * pi-tps: per-request visible-text latency and throughput (tokens/sec) for
  * assistant messages, with session averages in the footer.
  *
- * - Measures latency from the provider request start to the first thinking/text
- *   delta event.
+ * - Measures latency from provider invocation to the first non-blank text delta,
+ *   while retaining the original first-thinking/text-delta latency as raw data.
  * - Measures throughput over the emitted stream, or over the full request when
  *   the provider hides reasoning tokens from the stream.
  * - Per-message timing renders as one line directly below each assistant
@@ -43,7 +43,10 @@ const REQUEST_BASIS_APIS = new Set(["openai-responses", "openai-codex-responses"
 
 export interface Metric {
 	version: 3;
+	/** Original first thinking/text delta latency; never reinterpreted as visible text. */
 	ttftMs: number | undefined;
+	/** First non-blank text delta latency. Absent from legacy saved metrics. */
+	firstTextMs?: number;
 	rateMs: number;
 	outputTokens: number;
 	stopReason: string;
@@ -53,6 +56,10 @@ export interface Metric {
 export interface Aggregates {
 	totalTokens: number;
 	totalRateMs: number;
+	rateBasis: Metric["rateBasis"] | "mixed" | undefined;
+	textSumMs: number;
+	textCount: number;
+	/** Legacy latency only; do not average first-token and first-text measurements together. */
 	ttftSumMs: number;
 	ttftCount: number;
 }
@@ -61,6 +68,7 @@ export interface Aggregates {
 export interface PendingTiming {
 	requestStartMs: number;
 	firstDeltaMs: number | undefined;
+	firstTextMs: number | undefined;
 	sawThinkingDelta: boolean;
 	api: string | undefined;
 }
@@ -68,6 +76,9 @@ export interface PendingTiming {
 export const emptyAggregates = (): Aggregates => ({
 	totalTokens: 0,
 	totalRateMs: 0,
+	rateBasis: undefined,
+	textSumMs: 0,
+	textCount: 0,
 	ttftSumMs: 0,
 	ttftCount: 0,
 });
@@ -78,6 +89,9 @@ export function isUsableMetric(data: unknown): data is Metric & { ttftMs: number
 	return (
 		m.version === 3 &&
 		typeof m.ttftMs === "number" && Number.isFinite(m.ttftMs) && m.ttftMs >= 0 &&
+		(m.firstTextMs === undefined || (
+			typeof m.firstTextMs === "number" && Number.isFinite(m.firstTextMs) && m.firstTextMs >= m.ttftMs
+		)) &&
 		typeof m.rateMs === "number" && Number.isFinite(m.rateMs) && m.rateMs > 0 &&
 		typeof m.outputTokens === "number" && Number.isFinite(m.outputTokens) && m.outputTokens > 0 &&
 		(m.rateBasis === "stream" || m.rateBasis === "request") &&
@@ -112,8 +126,14 @@ function record(agg: Aggregates, m: Metric): void {
 	if (!isUsableMetric(m)) return;
 	agg.totalTokens += m.outputTokens;
 	agg.totalRateMs += m.rateMs;
-	agg.ttftSumMs += m.ttftMs;
-	agg.ttftCount += 1;
+	agg.rateBasis = agg.rateBasis === undefined || agg.rateBasis === m.rateBasis ? m.rateBasis : "mixed";
+	if (m.firstTextMs !== undefined) {
+		agg.textSumMs += m.firstTextMs;
+		agg.textCount += 1;
+	} else {
+		agg.ttftSumMs += m.ttftMs;
+		agg.ttftCount += 1;
+	}
 }
 
 export function fmtSeconds(ms: number): string {
@@ -131,22 +151,32 @@ export function recordInFlight(agg: Aggregates, inFlight: readonly Metric[]): vo
 	for (const metric of inFlight) record(agg, metric);
 }
 
+function rateBasisLabel(basis: NonNullable<Aggregates["rateBasis"]>): string {
+	return basis === "request" ? "full request" : basis;
+}
+
 /** One line for a persisted metric entry, or undefined when there is nothing to show. */
 export function entryMetricLine(data: unknown): string | undefined {
 	// Session files are user-editable, so validate unknown data before formatting.
 	if (!isUsableMetric(data)) return undefined;
-	return `⏱ ${fmtSeconds(data.ttftMs)} · ${fmtTps(data.outputTokens, data.rateMs)} tok/s`;
+	const latency = data.firstTextMs === undefined
+		? `first token ${fmtSeconds(data.ttftMs)}`
+		: `text ${fmtSeconds(data.firstTextMs)}`;
+	return `⏱ ${latency} · ${fmtTps(data.outputTokens, data.rateMs)} tok/s (${rateBasisLabel(data.rateBasis)})`;
 }
 
 /** Footer line for the session: averages, or undefined before the first measurement. */
 export function summaryLine(agg: Aggregates): string | undefined {
-	if (agg.ttftCount === 0) return undefined;
-	return `⏱ ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s`;
+	if (agg.rateBasis === undefined) return undefined;
+	const latencies: string[] = [];
+	if (agg.textCount > 0) latencies.push(`text ${fmtSeconds(agg.textSumMs / agg.textCount)}`);
+	if (agg.ttftCount > 0) latencies.push(`first token ${fmtSeconds(agg.ttftSumMs / agg.ttftCount)}`);
+	return `⏱ ${latencies.join(" · ")} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s (${rateBasisLabel(agg.rateBasis)})`;
 }
 
 /** Turn captured timing plus the finished message into a persistable metric. */
 export function metricFromTiming(pending: PendingTiming, message: AssistantMessage, endMs: number): Metric {
-	const { firstDeltaMs } = pending;
+	const { firstDeltaMs, firstTextMs } = pending;
 	const rateBasis = chooseRateBasis(
 		pending.api ?? message.api,
 		pending.sawThinkingDelta,
@@ -155,6 +185,7 @@ export function metricFromTiming(pending: PendingTiming, message: AssistantMessa
 	return {
 		version: 3,
 		ttftMs: firstDeltaMs === undefined ? undefined : firstDeltaMs - pending.requestStartMs,
+		firstTextMs: firstTextMs === undefined ? undefined : firstTextMs - pending.requestStartMs,
 		rateMs: rateBasis === "request" ? endMs - pending.requestStartMs : firstDeltaMs === undefined ? 0 : endMs - firstDeltaMs,
 		// pi-ai defines reasoning as a subset of output, not an additional count.
 		outputTokens: message.usage?.output ?? 0,
@@ -243,6 +274,7 @@ export default function piTps(pi: ExtensionAPI) {
 			// Unlike the global payload hook, this clock belongs to this response.
 			requestStartMs: event.message.timestamp,
 			firstDeltaMs: undefined,
+			firstTextMs: undefined,
 			sawThinkingDelta: false,
 			api: event.message.api,
 		};
@@ -250,9 +282,14 @@ export default function piTps(pi: ExtensionAPI) {
 
 	pi.on("message_update", async (event) => {
 		if (!pending) return;
-		const type = event.assistantMessageEvent.type;
-		if (type === "thinking_delta") pending.sawThinkingDelta = true;
-		if (pending.firstDeltaMs === undefined && (type === "thinking_delta" || type === "text_delta")) pending.firstDeltaMs = Date.now();
+		const delta = event.assistantMessageEvent;
+		if (delta.type !== "thinking_delta" && delta.type !== "text_delta") return;
+		const now = Date.now();
+		if (delta.type === "thinking_delta") pending.sawThinkingDelta = true;
+		if (pending.firstDeltaMs === undefined) pending.firstDeltaMs = now;
+		if (pending.firstTextMs === undefined && delta.type === "text_delta" && delta.delta.trim().length > 0) {
+			pending.firstTextMs = now;
+		}
 	});
 
 	pi.on("message_end", async (event, ctx) => {
@@ -264,9 +301,10 @@ export default function piTps(pi: ExtensionAPI) {
 		const metric = metricFromTiming(started, event.message, Date.now());
 		// Only completed responses with visible prose have meaningful
 		// latency/throughput. Tool-only, failed, aborted, and empty streams must
-		// not create rows or contaminate the session averages. Text that
-		// accompanies tool calls is still user-visible, so those turns are timed.
-		if (!isUsableMetric(metric) || !hasVisibleText(event.message)) return;
+		// not create rows or contaminate the session averages. Require an observed
+		// text delta so new metrics never masquerade as legacy first-token data.
+		// Text accompanying tool calls is still user-visible and worth timing.
+		if (metric.firstTextMs === undefined || !isUsableMetric(metric) || !hasVisibleText(event.message)) return;
 
 		record(agg, metric);
 		pendingMetrics.push(metric);
