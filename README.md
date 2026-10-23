@@ -31,7 +31,7 @@ Tool-only responses, responses without an observed non-blank text delta, and fai
 /tps reset    Clear session averages
 ```
 
-Timing state and measurements persist with the session and follow the active branch after `/reload` or `/tree` navigation. `/tps reset` clears the session averages and stays cleared across reloads and branch navigation. The last on/off value is also saved under the agent config directory (`~/.pi/agent/extensions/pi-tps.json` by default), so new sessions start with timing as it was last set.
+Timing state and measurements persist with the session and follow the active branch after `/reload` or `/tree` navigation. `/tps reset` clears the session averages and stays cleared across reloads and branch navigation. The last on/off value is also saved under the agent config directory (`~/.pi/agent/extensions/pi-tps.json` by default), so new sessions start with timing as it was last set. If that default cannot be saved, the toggle reports an error and leaves the session unchanged.
 
 Turning timing off stops new measurements and clears the footer right away. Saved timing rows remain visible, including after `/reload`, `/resume`, and `/tree` navigation.
 

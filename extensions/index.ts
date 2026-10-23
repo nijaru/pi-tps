@@ -196,13 +196,8 @@ export function readGlobalState(path = GLOBAL_STATE_PATH): boolean | undefined {
 }
 
 export function writeGlobalState(active: boolean, path = GLOBAL_STATE_PATH): void {
-	try {
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, `${JSON.stringify({ active }, null, 2)}\n`, "utf8");
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		console.warn(`[${STATUS_KEY}] failed to save global timing state: ${message}`);
-	}
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify({ active }, null, 2)}\n`, "utf8");
 }
 
 interface BranchState {
@@ -323,6 +318,7 @@ export default function piTps(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const arg = args.trim().toLowerCase();
+			const previous = active;
 			switch (arg) {
 				case "":
 					active = !active;
@@ -350,8 +346,14 @@ export default function piTps(pi: ExtensionAPI) {
 					ctx.ui.notify("Usage: /tps [on|off|status|reset]", "error");
 					return;
 			}
+			try {
+				writeGlobalState(active);
+			} catch {
+				active = previous;
+				ctx.ui.notify(`Request timing unchanged: could not save ${GLOBAL_STATE_PATH}. Check its file permissions.`, "error");
+				return;
+			}
 			pi.appendEntry(STATE_ENTRY, { active });
-			writeGlobalState(active);
 			if (active) {
 				// The branch has no entry yet for a metric measured earlier in the same
 				// turn; count it so the live footer matches what a reload recomputes.

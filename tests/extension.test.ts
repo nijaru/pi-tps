@@ -1,4 +1,7 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piTps, { METRIC_ENTRY, STATE_ENTRY, type Metric } from "../extensions/index.ts";
 
@@ -19,6 +22,28 @@ function fixture(active: boolean) {
 	} as unknown as ExtensionAPI);
 	return { entries, statuses, emit: async (name: string, event: unknown) => handlers.get(name)?.(event, ctx), row: (metric: Metric) => renderer({ data: metric }, {}, { fg: (_color: string, text: string) => text }) };
 }
+
+test("a failed durable toggle reports an error and leaves recording unchanged", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-tps-save-"));
+	try {
+		// A directory at the file path fails deterministically, even as root.
+		mkdirSync(join(dir, "extensions", "pi-tps.json"), { recursive: true });
+		const child = Bun.spawnSync([process.execPath, "-e", `
+			import extension from ${JSON.stringify(new URL("../extensions/index.ts", import.meta.url).href)};
+			let command; const entries = [], notices = [];
+			extension({ on() {}, registerEntryRenderer() {}, registerCommand(_, value) { command = value; }, appendEntry(...args) { entries.push(args); } });
+			const ctx = { ui: { setStatus() {}, notify(message, level) { notices.push({ message, level }); } }, sessionManager: { getBranch() { return []; } } };
+			await command.handler("on", ctx);
+			await command.handler("status", ctx);
+			console.log(JSON.stringify({ entries, notices }));
+		`], { env: { ...process.env, PI_CODING_AGENT_DIR: dir } });
+		expect(child.exitCode).toBe(0);
+		const { entries, notices } = JSON.parse(new TextDecoder().decode(child.stdout));
+		expect(entries).toEqual([]);
+		expect(notices.map((notice: { level: string }) => notice.level)).toEqual(["error", "info"]);
+		expect(notices.at(-1).message).toBe("Request timing off.");
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("saved timing rows remain visible when recording is disabled", async () => {
 	const f = fixture(false);
