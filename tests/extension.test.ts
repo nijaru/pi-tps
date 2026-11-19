@@ -116,7 +116,7 @@ test("hidden Responses reasoning uses visible-text latency and the full request 
 	expect(f.statuses.at(-1)).toBe("· ⏱ 0.50s · 100 tok/s (request)");
 });
 
-test("a thinking delta after visible text still counts reasoning as streamed", async () => {
+test("a non-Responses thinking delta does not establish that all reasoning was streamed", async () => {
 	const f = fixture(true);
 	const tick = clock();
 	await f.emit("session_start", {});
@@ -130,17 +130,18 @@ test("a thinking delta after visible text still counts reasoning as streamed", a
 	tick(2000);
 	await f.emit("message_end", { message });
 	await f.emit("turn_end", { message });
-	// Stream basis keeps rateMs at the emitted window (500); ignoring the late
-	// thinking delta would misread hidden reasoning and use the full 1000ms request.
-	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 500, firstTextMs: 500, rateMs: 500, outputTokens: 100, stopReason: "stop", rateBasis: "stream" } }]);
+	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 500, firstTextMs: 500, rateMs: 1000, outputTokens: 100, stopReason: "stop", rateBasis: "request" } }]);
 });
 
-test("thinking and blank text do not end the wait for visible text", async () => {
+test.each([
+	{ reasoning: 900, rateBasis: "request", rateMs: 1000, tps: "1000" },
+	{ reasoning: undefined, rateBasis: "stream", rateMs: 800, tps: "1250" },
+])("tiny thinking and blank text leave visible-text latency unchanged ($rateBasis)", async ({ reasoning, rateBasis, rateMs, tps }) => {
 	const f = fixture(true);
 	const tick = clock();
 	await f.emit("session_start", {});
 	tick(1000);
-	const message = { role: "assistant", timestamp: 1000, api: "openai-completions", stopReason: "stop", usage: { output: 100, reasoning: 20 }, content: [{ type: "text", text: "answer" }] };
+	const message = { role: "assistant", timestamp: 1000, api: "openai-completions", stopReason: "stop", usage: { output: 1000, reasoning }, content: [{ type: "thinking", thinking: "hmm" }, { type: "text", text: "answer!" }] };
 	await f.emit("message_start", { message });
 	for (const [time, type, delta] of [[1100, "text_delta", ""], [1200, "thinking_delta", "hmm"], [1300, "text_delta", "\n"], [1800, "text_delta", "answer"], [1900, "text_delta", "!"]] as const) {
 		tick(time);
@@ -149,10 +150,11 @@ test("thinking and blank text do not end the wait for visible text", async () =>
 	tick(2000);
 	await f.emit("message_end", { message });
 	await f.emit("turn_end", { message });
-	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 200, firstTextMs: 800, rateMs: 800, outputTokens: 100, stopReason: "stop", rateBasis: "stream" } }]);
+	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 200, firstTextMs: 800, rateMs, outputTokens: 1000, stopReason: "stop", rateBasis } }]);
 	const saved = JSON.parse(JSON.stringify(f.entries[0]!.data));
-	expect(f.row(saved)?.render(100).join("\n")).toContain("0.80s · 125 tok/s");
-	expect(f.statuses.at(-1)).toBe("· ⏱ 0.80s · 125 tok/s (stream)");
+	const line = `0.80s · ${tps} tok/s (${rateBasis})`;
+	expect(f.row(saved)?.render(100).join("\n")).toContain(line);
+	expect(f.statuses.at(-1)).toBe(`· ⏱ ${line}`);
 });
 
 test("rows follow visible text, not turn endings", async () => {

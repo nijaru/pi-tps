@@ -54,8 +54,6 @@ const timing = (overrides: Partial<PendingTiming> = {}): PendingTiming => ({
 	firstDeltaMs: 1500,
 	firstTextMs: 1500,
 	sawMoreOutput: true,
-	sawThinkingDelta: false,
-	api: "anthropic-messages",
 	...overrides,
 });
 
@@ -108,23 +106,12 @@ describe("hasVisibleText", () => {
 });
 
 describe("chooseRateBasis", () => {
-	test("streams when the provider reports no reasoning tokens", () => {
-		expect(chooseRateBasis(undefined, false, 0)).toBe("stream");
-		expect(chooseRateBasis("anthropic-messages", false, 0)).toBe("stream");
+	test("uses stream timing for multiple chunks without reported reasoning", () => {
+		expect(chooseRateBasis(true, 0)).toBe("stream");
 	});
-	test("requests for Responses APIs that can hide reasoning from the stream", () => {
-		for (const api of ["openai-responses", "openai-codex-responses", "azure-openai-responses"]) {
-			expect(chooseRateBasis(api, false, 512)).toBe("request");
-			// A visible summary does not mean the reasoning tokens were streamed.
-			expect(chooseRateBasis(api, true, 512)).toBe("request");
-		}
-	});
-	test("streams for other APIs when a thinking delta was seen", () => {
-		expect(chooseRateBasis("anthropic-messages", true, 512)).toBe("stream");
-		expect(chooseRateBasis("google-generative-ai", true, 512)).toBe("stream");
-	});
-	test("requests for other APIs when reasoning happened off-stream", () => {
-		expect(chooseRateBasis("anthropic-messages", false, 512)).toBe("request");
+	test("uses request timing for externally reported reasoning or a single chunk", () => {
+		expect(chooseRateBasis(true, 512)).toBe("request");
+		expect(chooseRateBasis(false, 0)).toBe("request");
 	});
 });
 
@@ -274,8 +261,8 @@ describe("metricFromTiming", () => {
 	});
 	test("uses the full request window when reasoning is hidden", () => {
 		const m = metricFromTiming(
-			timing({ api: "openai-responses" }),
-			assistantMessage({ usage: { output: 100, reasoning: 40 } as AssistantMessage["usage"] }),
+			timing(),
+			assistantMessage({ api: "openai-responses", usage: { output: 100, reasoning: 40 } as AssistantMessage["usage"] }),
 			6000,
 		);
 		expect(m.ttftMs).toBe(500);
@@ -290,7 +277,7 @@ describe("metricFromTiming", () => {
 			content: [{ type: "thinking", thinking: "hidden", redacted: true }, { type: "text", text: "answer" }],
 			usage: { output: 100, reasoning: 40 } as AssistantMessage["usage"],
 		});
-		expect(metricFromTiming(timing({ sawThinkingDelta: true }), message, 6000).rateBasis).toBe("request");
+		expect(metricFromTiming(timing(), message, 6000).rateBasis).toBe("request");
 	});
 	test("keeps the tool-call ending for a turn that also emitted text", () => {
 		const m = metricFromTiming(

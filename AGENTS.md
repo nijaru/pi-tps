@@ -14,7 +14,7 @@ Pi loads the TypeScript entrypoint directly; there is no build step.
 - Timing entries (`tps-metric`) persist as session entries so rows and averages survive reloads and follow the active branch after `/tree`. `tps-reset` markers keep `/tps reset` durable; they render nothing. A row exists only for completed turns that emitted visible text, including text alongside tool calls.
 - Saved rows remain visible regardless of recording state: Pi builds the transcript before `session_start` restores branch state. On/off controls new measurements and the footer.
 - Use the assistant message timestamp for request timing; the global payload hook also fires for background cache warming and cannot correlate requests.
-- Throughput uses the emitted stream, or the full request window when the provider reports hidden reasoning tokens (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`).
+- Use the full request window for a single output chunk or a positive provider-reported reasoning token count. A thinking delta does not establish that all reasoning was streamed.
 - The extension never changes request handling; it only observes request/message events and renders.
 
 ## Testing

@@ -21,9 +21,6 @@ const GLOBAL_STATE_PATH = join(getAgentDir(), "extensions", "pi-tps.json");
 /** Turn endings that completed the stream and are worth timing. */
 const COMPLETED_STOP_REASONS = new Set(["stop", "length", "toolUse"]);
 
-/** APIs that can report hidden reasoning tokens even while emitting reasoning summaries. */
-const REQUEST_BASIS_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
-
 type RateBasis = "stream" | "request";
 
 export interface Metric {
@@ -55,8 +52,6 @@ export interface PendingTiming {
 	firstDeltaMs: number | undefined;
 	firstTextMs: number | undefined;
 	sawMoreOutput: boolean;
-	sawThinkingDelta: boolean;
-	api: string | undefined;
 }
 
 export const emptyAggregates = (): Aggregates => ({
@@ -89,22 +84,11 @@ export function hasVisibleText(message: AssistantMessage): boolean {
 	return message.content.some((part) => part.type === "text" && part.text.trim().length > 0);
 }
 
-export function chooseRateBasis(
-	api: string | undefined,
-	sawThinkingDelta: boolean,
-	reasoningTokens: number,
-): RateBasis {
-	if (reasoningTokens <= 0) return "stream";
-
-	// Responses-style APIs can report hidden reasoning tokens even when they
-	// emit a reasoning summary. Include the full request window for that output.
-	// Azure uses the same Responses protocol and reasoning token accounting as
-	// OpenAI (openai-responses-shared), so it gets the same treatment.
-	if (api !== undefined && REQUEST_BASIS_APIS.has(api)) return "request";
-
-	// For other APIs, a thinking delta means reasoning was part of the emitted
-	// stream. Without one, assume reported reasoning happened before first text.
-	return sawThinkingDelta ? "stream" : "request";
+export function chooseRateBasis(sawMoreOutput: boolean, reasoningTokens: number): RateBasis {
+	// A thinking delta can be a summary; Pi's normalized events don't establish
+	// that every reported reasoning token was streamed. A single output chunk
+	// also gives us no observable generation interval after its arrival.
+	return reasoningTokens > 0 || !sawMoreOutput ? "request" : "stream";
 }
 
 function record(agg: Aggregates, m: unknown): void {
@@ -154,17 +138,12 @@ export function summaryLine(agg: Aggregates): string | undefined {
 /** Turn captured timing plus the finished message into a persistable metric. */
 export function metricFromTiming(pending: PendingTiming, message: AssistantMessage, endMs: number): Metric {
 	const { firstDeltaMs, firstTextMs } = pending;
-	// A single chunk has no observable generation interval after its arrival.
-	const rateBasis = firstDeltaMs !== undefined && !pending.sawMoreOutput ? "request" : chooseRateBasis(
-		pending.api ?? message.api,
-		pending.sawThinkingDelta && !message.content.some((part) => part.type === "thinking" && part.redacted),
-		message.usage?.reasoning ?? 0,
-	);
+	const rateBasis = chooseRateBasis(pending.sawMoreOutput, message.usage?.reasoning ?? 0);
 	return {
 		version: 3,
 		ttftMs: firstDeltaMs === undefined ? undefined : firstDeltaMs - pending.requestStartMs,
 		firstTextMs: firstTextMs === undefined ? undefined : firstTextMs - pending.requestStartMs,
-		rateMs: rateBasis === "request" ? endMs - pending.requestStartMs : firstDeltaMs === undefined ? 0 : endMs - firstDeltaMs,
+		rateMs: firstDeltaMs === undefined ? 0 : endMs - (rateBasis === "request" ? pending.requestStartMs : firstDeltaMs),
 		// pi-ai defines reasoning as a subset of output, not an additional count.
 		outputTokens: message.usage?.output ?? 0,
 		stopReason: message.stopReason ?? "unknown",
@@ -257,15 +236,12 @@ export default function piTps(pi: ExtensionAPI) {
 			firstDeltaMs: undefined,
 			firstTextMs: undefined,
 			sawMoreOutput: false,
-			sawThinkingDelta: false,
-			api: event.message.api,
 		};
 	});
 
 	pi.on("message_update", (event) => {
 		if (!pending) return;
 		const delta = event.assistantMessageEvent;
-		if (delta.type === "thinking_delta" && delta.delta) pending.sawThinkingDelta = true;
 		const firstText = pending.firstTextMs === undefined && delta.type === "text_delta" && /\S/.test(delta.delta);
 		const output = !pending.sawMoreOutput && (
 			delta.type === "toolcall_start" ||

@@ -11,7 +11,7 @@ When enabled, pi-tps shows one timing line below each completed assistant respon
 ## Metrics
 
 - **Latency** — time from provider invocation (the assistant message timestamp) to the first non-blank text delta. Thinking does not stop this clock, whether Pi shows or hides thinking blocks. It includes provider-side request preparation and the wait for reasoning, but not Pi’s earlier credential lookup.
-- **Throughput** — reported output tokens divided by the elapsed time. `stream` starts at the first text, thinking, or tool-call output. `request` starts at provider invocation when the provider reports hidden reasoning, including on Responses APIs that stream a reasoning summary. It also applies when all output arrives in a single chunk and no stream rate can be measured. The output count already includes any reported reasoning tokens.
+- **Throughput** — reported output tokens divided by the elapsed time. `stream` starts at the first text, thinking, or tool-call output. `request` starts at provider invocation when the provider reports a positive reasoning token count: even a streamed thinking block may be a summary, so pi-tps cannot tell how much reasoning happened before the first output. It also uses `request` when all output arrives in a single chunk. The output count already includes any reported reasoning tokens.
 
 These throughput windows measure different things; neither is a visible-text-only generation rate.
 
