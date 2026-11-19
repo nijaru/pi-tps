@@ -1,11 +1,23 @@
-import { afterEach, expect, setSystemTime, test } from "bun:test";
+import { afterEach, expect, mock, setSystemTime, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piTps, { METRIC_ENTRY, STATE_ENTRY, type Metric } from "../extensions/index.ts";
 
-afterEach(() => setSystemTime());
+afterEach(() => {
+	setSystemTime();
+	mock.restore();
+});
+
+function clock() {
+	let elapsed = 0;
+	spyOn(performance, "now").mockImplementation(() => elapsed);
+	return (time: number, wall = time) => {
+		elapsed = time;
+		setSystemTime(wall);
+	};
+}
 
 function fixture(active: boolean) {
 	const handlers = new Map<string, (...args: any[]) => any>();
@@ -45,6 +57,35 @@ test("a failed durable toggle reports an error and leaves recording unchanged", 
 	} finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("off drops unfinished timing but preserves a response that already completed", () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-tps-toggle-"));
+	try {
+		const child = Bun.spawnSync([process.execPath, "-e", `
+			import extension from ${JSON.stringify(new URL("../extensions/index.ts", import.meta.url).href)};
+			const hooks = {}, entries = []; let command;
+			extension({ on(name, fn) { hooks[name] = fn; }, registerEntryRenderer() {}, registerCommand(_, value) { command = value; }, appendEntry(type, data) { entries.push(type); } });
+			const ctx = { ui: { setStatus() {}, notify() {} }, sessionManager: { getBranch() { return []; } } };
+			const message = { role: "assistant", timestamp: Date.now(), content: [{ type: "text", text: "answer" }], usage: { output: 10 }, stopReason: "stop" };
+			const event = { message };
+			const start = () => hooks.message_start(event, ctx);
+			const delta = () => hooks.message_update({ assistantMessageEvent: { type: "text_delta", delta: "answer" } }, ctx);
+			const end = () => hooks.message_end(event, ctx);
+			await command.handler("on", ctx);
+			start(); delta();
+			await command.handler("off", ctx);
+			await command.handler("on", ctx);
+			delta(); end(); hooks.turn_end(event, ctx);
+			start(); delta(); await Bun.sleep(2); end();
+			await command.handler("off", ctx);
+			hooks.turn_end(event, ctx); hooks.agent_end({}, ctx);
+			console.log(JSON.stringify(entries));
+		`], { env: { ...process.env, PI_CODING_AGENT_DIR: dir } });
+		expect(child.stderr.toString()).toBe("");
+		expect(child.exitCode).toBe(0);
+		expect(JSON.parse(child.stdout.toString())).toEqual([STATE_ENTRY, STATE_ENTRY, STATE_ENTRY, STATE_ENTRY, METRIC_ENTRY]);
+	} finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("saved timing rows remain visible when recording is disabled", async () => {
 	const f = fixture(false);
 	await f.emit("session_start", {});
@@ -55,35 +96,38 @@ test("saved timing rows remain visible when recording is disabled", async () => 
 
 test("hidden Responses reasoning uses visible-text latency and the full request despite warming activity", async () => {
 	const f = fixture(true);
+	const tick = clock();
 	await f.emit("session_start", {});
-	setSystemTime(800);
+	tick(800);
 	await f.emit("before_provider_request", {}); // background cache warmer
 	const message = { role: "assistant", timestamp: 1000, api: "openai-responses", stopReason: "stop", usage: { output: 100, reasoning: 40 }, content: [{ type: "text", text: "answer" }] };
+	tick(1100);
 	await f.emit("message_start", { message });
-	setSystemTime(1200);
+	tick(1200);
 	await f.emit("before_provider_request", {}); // another warming request
-	setSystemTime(1500);
+	tick(1500, 100); // wall-clock correction during the response
 	await f.emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: "answer" } });
-	setSystemTime(2000);
+	tick(2000);
 	await f.emit("message_end", { message });
 	await f.emit("turn_end", { message });
 	// Both latencies start at the message timestamp, not a warming request.
 	// Reasoning is a subset of output; no thinking delta is needed to count it.
 	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 500, firstTextMs: 500, rateMs: 1000, outputTokens: 100, stopReason: "stop", rateBasis: "request" } }]);
-	expect(f.statuses.at(-1)).toBe("· ⏱ 0.50s · 100 tok/s");
+	expect(f.statuses.at(-1)).toBe("· ⏱ 0.50s · 100 tok/s (request)");
 });
 
 test("a thinking delta after visible text still counts reasoning as streamed", async () => {
 	const f = fixture(true);
+	const tick = clock();
 	await f.emit("session_start", {});
-	setSystemTime(1000);
+	tick(1000);
 	const message = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "stop", usage: { output: 100, reasoning: 20 }, content: [{ type: "text", text: "answer" }] };
 	await f.emit("message_start", { message });
-	setSystemTime(1500);
+	tick(1500);
 	await f.emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: "answer" } });
-	setSystemTime(1700);
-	await f.emit("message_update", { assistantMessageEvent: { type: "thinking_delta" } });
-	setSystemTime(2000);
+	tick(1700);
+	await f.emit("message_update", { assistantMessageEvent: { type: "thinking_delta", delta: "thinking" } });
+	tick(2000);
 	await f.emit("message_end", { message });
 	await f.emit("turn_end", { message });
 	// Stream basis keeps rateMs at the emitted window (500); ignoring the late
@@ -93,39 +137,44 @@ test("a thinking delta after visible text still counts reasoning as streamed", a
 
 test("thinking and blank text do not end the wait for visible text", async () => {
 	const f = fixture(true);
+	const tick = clock();
 	await f.emit("session_start", {});
+	tick(1000);
 	const message = { role: "assistant", timestamp: 1000, api: "openai-completions", stopReason: "stop", usage: { output: 100, reasoning: 20 }, content: [{ type: "text", text: "answer" }] };
 	await f.emit("message_start", { message });
-	for (const [time, type, delta] of [[1200, "thinking_delta", "hmm"], [1300, "text_delta", "\n"], [1800, "text_delta", "answer"], [1900, "text_delta", "!"]] as const) {
-		setSystemTime(time);
+	for (const [time, type, delta] of [[1100, "text_delta", ""], [1200, "thinking_delta", "hmm"], [1300, "text_delta", "\n"], [1800, "text_delta", "answer"], [1900, "text_delta", "!"]] as const) {
+		tick(time);
 		await f.emit("message_update", { assistantMessageEvent: { type, delta } });
 	}
-	setSystemTime(2000);
+	tick(2000);
 	await f.emit("message_end", { message });
 	await f.emit("turn_end", { message });
 	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 200, firstTextMs: 800, rateMs: 800, outputTokens: 100, stopReason: "stop", rateBasis: "stream" } }]);
 	const saved = JSON.parse(JSON.stringify(f.entries[0]!.data));
 	expect(f.row(saved)?.render(100).join("\n")).toContain("0.80s · 125 tok/s");
-	expect(f.statuses.at(-1)).toBe("· ⏱ 0.80s · 125 tok/s");
+	expect(f.statuses.at(-1)).toBe("· ⏱ 0.80s · 125 tok/s (stream)");
 });
 
 test("rows follow visible text, not turn endings", async () => {
 	const f = fixture(true);
+	const tick = clock();
 	await f.emit("session_start", {});
-	setSystemTime(1000);
-	const toolTurn = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "toolUse", usage: { output: 100, reasoning: 0 }, content: [{ type: "text", text: "running it" }, { type: "toolCall", toolName: "bash" }] };
+	tick(1000);
+	const toolTurn = { role: "assistant", timestamp: 1000, api: "anthropic-messages", stopReason: "toolUse", usage: { output: 100, reasoning: 0 }, content: [{ type: "text", text: "running it" }, { type: "toolCall", toolName: "codemode" }] };
 	await f.emit("message_start", { message: toolTurn });
-	setSystemTime(1200);
+	tick(1100);
+	await f.emit("message_update", { assistantMessageEvent: { type: "toolcall_start" } });
+	tick(1200);
 	await f.emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: "running it" } });
-	setSystemTime(1500);
+	tick(1500);
 	await f.emit("message_end", { message: toolTurn });
 	await f.emit("turn_end", { message: toolTurn });
-	const silentTurn = { role: "assistant", timestamp: 2000, api: "anthropic-messages", stopReason: "toolUse", usage: { output: 50, reasoning: 0 }, content: [{ type: "toolCall", toolName: "bash" }] };
+	const silentTurn = { role: "assistant", timestamp: 2000, api: "anthropic-messages", stopReason: "toolUse", usage: { output: 50, reasoning: 0 }, content: [{ type: "toolCall", toolName: "codemode" }] };
 	await f.emit("message_start", { message: silentTurn });
-	setSystemTime(2100);
-	await f.emit("message_update", { assistantMessageEvent: { type: "thinking_delta" } });
-	setSystemTime(2300);
+	tick(2100);
+	await f.emit("message_update", { assistantMessageEvent: { type: "thinking_delta", delta: "thinking" } });
+	tick(2300);
 	await f.emit("message_end", { message: silentTurn });
 	await f.emit("turn_end", { message: silentTurn });
-	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 200, firstTextMs: 200, rateMs: 300, outputTokens: 100, stopReason: "toolUse", rateBasis: "stream" } }]);
+	expect(f.entries).toEqual([{ customType: METRIC_ENTRY, data: { version: 3, ttftMs: 100, firstTextMs: 200, rateMs: 400, outputTokens: 100, stopReason: "toolUse", rateBasis: "stream" } }]);
 });

@@ -1,21 +1,4 @@
-/**
- * pi-tps: per-request visible-text latency and throughput (tokens/sec) for
- * assistant messages, with session averages in the footer.
- *
- * - Measures latency from provider invocation to the first non-blank text delta,
- *   while retaining the original first-thinking/text-delta latency as raw data.
- * - Measures throughput over the emitted stream, or over the full request when
- *   the provider hides reasoning tokens from the stream.
- * - Per-message timing renders as one line directly below each assistant
- *   response that emitted visible text, including responses that also call
- *   tools. Tool-only, failed, and aborted turns are not timed.
- * - Toggle with /tps [on|off|status|reset]. State persists in the session,
- *   so it survives reloads and is restored on the correct branch after /tree.
- *   The last-set value is also saved under the agent config directory
- *   (pi-tps.json) so new sessions start with it.
- * - The footer only shows averages once the session has measurements; an
- *   enabled session with nothing measured yet adds no status text.
- */
+/** Visible-text latency and output throughput for completed Pi responses. */
 
 import {
 	getAgentDir,
@@ -25,7 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export const STATE_ENTRY = "tps-state";
@@ -41,21 +24,24 @@ const COMPLETED_STOP_REASONS = new Set(["stop", "length", "toolUse"]);
 /** APIs that can report hidden reasoning tokens even while emitting reasoning summaries. */
 const REQUEST_BASIS_APIS = new Set(["openai-responses", "openai-codex-responses", "azure-openai-responses"]);
 
+type RateBasis = "stream" | "request";
+
 export interface Metric {
 	version: 3;
-	/** Original first thinking/text delta latency; never reinterpreted as visible text. */
+	/** First observed output latency (thinking/text only in previously saved rows). */
 	ttftMs: number | undefined;
 	/** First non-blank text delta latency. Absent from legacy saved metrics. */
 	firstTextMs?: number;
 	rateMs: number;
 	outputTokens: number;
 	stopReason: string;
-	rateBasis: "stream" | "request";
+	rateBasis: RateBasis;
 }
 
 export interface Aggregates {
 	totalTokens: number;
 	totalRateMs: number;
+	rateBasis?: RateBasis | "mixed";
 	textSumMs: number;
 	textCount: number;
 	/** Legacy latency only; do not average first-token and first-text measurements together. */
@@ -68,6 +54,7 @@ export interface PendingTiming {
 	requestStartMs: number;
 	firstDeltaMs: number | undefined;
 	firstTextMs: number | undefined;
+	sawMoreOutput: boolean;
 	sawThinkingDelta: boolean;
 	api: string | undefined;
 }
@@ -106,7 +93,7 @@ export function chooseRateBasis(
 	api: string | undefined,
 	sawThinkingDelta: boolean,
 	reasoningTokens: number,
-): "stream" | "request" {
+): RateBasis {
 	if (reasoningTokens <= 0) return "stream";
 
 	// Responses-style APIs can report hidden reasoning tokens even when they
@@ -120,10 +107,11 @@ export function chooseRateBasis(
 	return sawThinkingDelta ? "stream" : "request";
 }
 
-function record(agg: Aggregates, m: Metric): void {
+function record(agg: Aggregates, m: unknown): void {
 	if (!isUsableMetric(m)) return;
 	agg.totalTokens += m.outputTokens;
 	agg.totalRateMs += m.rateMs;
+	agg.rateBasis = agg.rateBasis === undefined || agg.rateBasis === m.rateBasis ? m.rateBasis : "mixed";
 	if (m.firstTextMs !== undefined) {
 		agg.textSumMs += m.firstTextMs;
 		agg.textCount += 1;
@@ -143,16 +131,16 @@ export function fmtTps(tokens: number, ms: number): string {
 	return tps >= 100 ? String(Math.round(tps)) : tps.toFixed(1);
 }
 
-/** Add metrics measured this turn that are not yet persisted as branch entries. */
-export function recordInFlight(agg: Aggregates, inFlight: readonly Metric[]): void {
-	for (const metric of inFlight) record(agg, metric);
+/** Include a completed response whose session row still waits for turn_end. */
+export function recordInFlight(agg: Aggregates, metric: Metric | undefined): void {
+	if (metric) record(agg, metric);
 }
 
 /** One line for a persisted metric entry, or undefined when there is nothing to show. */
 export function entryMetricLine(data: unknown): string | undefined {
 	// Session files are user-editable, so validate unknown data before formatting.
 	if (!isUsableMetric(data)) return undefined;
-	return `⏱ ${fmtSeconds(data.firstTextMs ?? data.ttftMs)} · ${fmtTps(data.outputTokens, data.rateMs)} tok/s`;
+	return `⏱ ${fmtSeconds(data.firstTextMs ?? data.ttftMs)} · ${fmtTps(data.outputTokens, data.rateMs)} tok/s (${data.rateBasis})`;
 }
 
 /** Footer line for the session: averages, or undefined before the first measurement. */
@@ -160,15 +148,16 @@ export function summaryLine(agg: Aggregates): string | undefined {
 	if (agg.textCount === 0 && agg.ttftCount === 0) return undefined;
 	// Prefer visible-text timing without blending it with legacy first-token data.
 	const latency = agg.textCount > 0 ? agg.textSumMs / agg.textCount : agg.ttftSumMs / agg.ttftCount;
-	return `⏱ ${fmtSeconds(latency)} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s`;
+	return `⏱ ${fmtSeconds(latency)} · ${fmtTps(agg.totalTokens, agg.totalRateMs)} tok/s (${agg.rateBasis})`;
 }
 
 /** Turn captured timing plus the finished message into a persistable metric. */
 export function metricFromTiming(pending: PendingTiming, message: AssistantMessage, endMs: number): Metric {
 	const { firstDeltaMs, firstTextMs } = pending;
-	const rateBasis = chooseRateBasis(
+	// A single chunk has no observable generation interval after its arrival.
+	const rateBasis = firstDeltaMs !== undefined && !pending.sawMoreOutput ? "request" : chooseRateBasis(
 		pending.api ?? message.api,
-		pending.sawThinkingDelta,
+		pending.sawThinkingDelta && !message.content.some((part) => part.type === "thinking" && part.redacted),
 		message.usage?.reasoning ?? 0,
 	);
 	return {
@@ -196,8 +185,16 @@ export function readGlobalState(path = GLOBAL_STATE_PATH): boolean | undefined {
 }
 
 export function writeGlobalState(active: boolean, path = GLOBAL_STATE_PATH): void {
-	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify({ active }, null, 2)}\n`, "utf8");
+	const dir = dirname(path);
+	mkdirSync(dir, { recursive: true });
+	const tmp = mkdtempSync(join(dir, ".pi-tps-"));
+	try {
+		const file = join(tmp, "state.json");
+		writeFileSync(file, `${JSON.stringify({ active }, null, 2)}\n`, "utf8");
+		renameSync(file, path);
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
 }
 
 interface BranchState {
@@ -212,17 +209,16 @@ function scanBranch(entries: readonly SessionEntry[]): BranchState {
 	for (const entry of entries) {
 		if (entry.type !== "custom") continue;
 		switch (entry.customType) {
-			case STATE_ENTRY:
-				// Treat null like missing data so branch scans never cast null to a state.
-				if (typeof entry.data === "object" && entry.data !== null) {
-					active = (entry.data as { active?: unknown }).active === true;
-				}
+			case STATE_ENTRY: {
+				const value = (entry.data as { active?: unknown } | null | undefined)?.active;
+				if (typeof value === "boolean") active = value;
 				break;
+			}
 			case RESET_ENTRY:
 				agg = emptyAggregates();
 				break;
 			case METRIC_ENTRY:
-				if (typeof entry.data === "object" && entry.data !== null) record(agg, entry.data as Metric);
+				record(agg, entry.data);
 				break;
 		}
 	}
@@ -243,7 +239,8 @@ export default function piTps(pi: ExtensionAPI) {
 	// On/off controls recording and the footer, not saved transcript evidence.
 	let active = readGlobalState() ?? false;
 	let pending: PendingTiming | undefined;
-	let pendingMetrics: Metric[] = [];
+	// Pi finishes each assistant turn before starting the next one.
+	let completed: Metric | undefined;
 	let agg = emptyAggregates();
 
 	function updateFooter(ctx: ExtensionContext): void {
@@ -251,38 +248,44 @@ export default function piTps(pi: ExtensionAPI) {
 		ctx.ui.setStatus(STATUS_KEY, line ? `· ${line}` : undefined);
 	}
 
-	pi.on("message_start", async (event) => {
+	pi.on("message_start", (event) => {
 		if (!active || event.message.role !== "assistant") return;
+		// Anchor Pi's invocation timestamp to the monotonic clock once, so wall
+		// clock changes during the stream do not skew elapsed time.
 		pending = {
-			// Pi providers stamp the message at invocation, before HTTP dispatch.
-			// Unlike the global payload hook, this clock belongs to this response.
-			requestStartMs: event.message.timestamp,
+			requestStartMs: performance.now() - Math.max(0, Date.now() - event.message.timestamp),
 			firstDeltaMs: undefined,
 			firstTextMs: undefined,
+			sawMoreOutput: false,
 			sawThinkingDelta: false,
 			api: event.message.api,
 		};
 	});
 
-	pi.on("message_update", async (event) => {
+	pi.on("message_update", (event) => {
 		if (!pending) return;
 		const delta = event.assistantMessageEvent;
-		if (delta.type !== "thinking_delta" && delta.type !== "text_delta") return;
-		const now = Date.now();
-		if (delta.type === "thinking_delta") pending.sawThinkingDelta = true;
-		if (pending.firstDeltaMs === undefined) pending.firstDeltaMs = now;
-		if (pending.firstTextMs === undefined && delta.type === "text_delta" && delta.delta.trim().length > 0) {
-			pending.firstTextMs = now;
-		}
+		if (delta.type === "thinking_delta" && delta.delta) pending.sawThinkingDelta = true;
+		const firstText = pending.firstTextMs === undefined && delta.type === "text_delta" && /\S/.test(delta.delta);
+		const output = !pending.sawMoreOutput && (
+			delta.type === "toolcall_start" ||
+			((delta.type === "toolcall_delta" || delta.type === "thinking_delta" || delta.type === "text_delta") && delta.delta.length > 0)
+		);
+		const firstOutput = output && pending.firstDeltaMs === undefined;
+		if (output && !firstOutput) pending.sawMoreOutput = true;
+		if (!firstText && !firstOutput) return;
+		const now = performance.now();
+		if (firstOutput) pending.firstDeltaMs = now;
+		if (firstText) pending.firstTextMs = now;
 	});
 
-	pi.on("message_end", async (event, ctx) => {
+	pi.on("message_end", (event, ctx) => {
 		if (event.message.role !== "assistant") return;
 		const started = pending;
 		pending = undefined;
 		if (!started) return;
 
-		const metric = metricFromTiming(started, event.message, Date.now());
+		const metric = metricFromTiming(started, event.message, performance.now());
 		// Only completed responses with visible prose have meaningful
 		// latency/throughput. Tool-only, failed, aborted, and empty streams must
 		// not create rows or contaminate the session averages. Require an observed
@@ -291,22 +294,24 @@ export default function piTps(pi: ExtensionAPI) {
 		if (metric.firstTextMs === undefined || !isUsableMetric(metric) || !hasVisibleText(event.message)) return;
 
 		record(agg, metric);
-		pendingMetrics.push(metric);
+		completed = metric;
 		updateFooter(ctx);
 	});
 
 	function flushMetric(): void {
-		const metric = pendingMetrics.shift();
-		if (metric) pi.appendEntry(METRIC_ENTRY, metric);
+		if (!completed) return;
+		pi.appendEntry(METRIC_ENTRY, completed);
+		completed = undefined;
 	}
 
-	pi.on("turn_end", async (event) => {
+	pi.on("turn_end", (event) => {
 		if (event.message.role === "assistant") flushMetric();
 	});
 
-	// Preserve a partial metric if an agent run ends without a turn_end event.
-	pi.on("agent_end", async () => {
-		while (pendingMetrics.length > 0) flushMetric();
+	// Preserve a completed response if the run stopped before turn_end.
+	pi.on("agent_end", () => {
+		pending = undefined;
+		flushMetric();
 	});
 
 	pi.registerCommand("tps", {
@@ -332,7 +337,7 @@ export default function piTps(pi: ExtensionAPI) {
 					// A metric measured earlier in the same turn flushes after this
 					// marker, so it survives a reload and counts toward the fresh
 					// averages. Re-record it now to keep the live footer consistent.
-					recordInFlight(agg, pendingMetrics);
+					recordInFlight(agg, completed);
 					pi.appendEntry(RESET_ENTRY, {});
 					updateFooter(ctx);
 					ctx.ui.notify("Timing averages reset.", "info");
@@ -354,12 +359,9 @@ export default function piTps(pi: ExtensionAPI) {
 				return;
 			}
 			pi.appendEntry(STATE_ENTRY, { active });
-			if (active) {
-				// The branch has no entry yet for a metric measured earlier in the same
-				// turn; count it so the live footer matches what a reload recomputes.
-				agg = aggregatesFromBranch(ctx.sessionManager.getBranch());
-				recordInFlight(agg, pendingMetrics);
-			}
+			// An unfinished response is discarded on off, even if enabled again
+			// before it finishes. Already completed responses are still saved.
+			if (!active) pending = undefined;
 			updateFooter(ctx);
 			ctx.ui.notify(`Request timing ${active ? "on" : "off"}.`, "info");
 		},
@@ -375,7 +377,7 @@ export default function piTps(pi: ExtensionAPI) {
 	// tps-reset entries are durable markers only; without a registered
 	// renderer, pi renders nothing for them in the transcript.
 
-	pi.on("session_start", async (_event, ctx) => {
+	function restoreBranch(ctx: ExtensionContext): void {
 		const state = scanBranch(ctx.sessionManager.getBranch());
 		// Sessions without recorded state seed from the global value so they
 		// start as /tps was last set; once recorded, the session entry wins.
@@ -383,16 +385,12 @@ export default function piTps(pi: ExtensionAPI) {
 		if (state.active === undefined) pi.appendEntry(STATE_ENTRY, { active });
 		agg = state.agg;
 		updateFooter(ctx);
-	});
+	}
 
-	pi.on("session_tree", async (_event, ctx) => {
-		const state = scanBranch(ctx.sessionManager.getBranch());
-		active = state.active ?? active;
-		agg = state.agg;
-		updateFooter(ctx);
-	});
+	pi.on("session_start", (_event, ctx) => restoreBranch(ctx));
+	pi.on("session_tree", (_event, ctx) => restoreBranch(ctx));
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", (_event, ctx) => {
 		ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 }
